@@ -179,6 +179,11 @@ fate-uuid: libavutil/tests/uuid$(EXESUF)
 fate-uuid: CMD = run libavutil/tests/uuid$(EXESUF)
 fate-uuid: CMP = null
 
+FATE_LIBAVUTIL += fate-quantize
+fate-quantize: libavutil/tests/quantize$(EXESUF)
+fate-quantize: CMD = run libavutil/tests/quantize$(EXESUF)
+fate-quantize: CMP = null
+
 FATE_LIBAVUTIL += $(FATE_LIBAVUTIL-yes)
 FATE-$(CONFIG_AVUTIL) += $(FATE_LIBAVUTIL)
 fate-libavutil: $(FATE_LIBAVUTIL)

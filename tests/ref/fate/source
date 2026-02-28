@@ -28,4 +28,13 @@ compat/stdbit/stdbit.h
 libavcodec/bitstream_template.h
 tools/decode_simple.h
 Use of av_clip() where av_clip_uintp2() could be used:
+libavutil/neuquant.c:    return 1 + av_clip(a, 0, 255);
+libavutil/neuquant.c:        int smallval = av_clip(ctx->network[i][0] >> 8, 0, 255);
+libavutil/neuquant.c:            int val = av_clip(ctx->network[j][0] >> 8, 0, 255);
+libavutil/neuquant.c:        int alpha = av_clip((ctx->network[i][3] + 128) / 257, 0, 255);
+libavutil/neuquant.c:    int bin   = av_clip(L >> 8, 0, 255);
+libavutil/quantize.c:        palette[i] = ((uint32_t)av_clip(cb[3], 0, 255) << 24) |
+libavutil/quantize.c:                     ((uint32_t)av_clip(cb[0], 0, 255) << 16) |
+libavutil/quantize.c:                     ((uint32_t)av_clip(cb[1], 0, 255) <<  8) |
+libavutil/quantize.c:                      (uint32_t)av_clip(cb[2], 0, 255);
 Use of av_clip() where av_clip_intp2() could be used:
