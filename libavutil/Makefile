@@ -75,6 +75,7 @@ HEADERS = adler32.h                                                     \
           pixdesc.h                                                     \
           pixelutils.h                                                  \
           pixfmt.h                                                      \
+          quantize.h                                                    \
           random_seed.h                                                 \
           rc4.h                                                         \
           rational.h                                                    \
@@ -164,11 +165,13 @@ OBJS = adler32.o                                                        \
        md5.o                                                            \
        mem.o                                                            \
        murmur3.o                                                        \
+       neuquant.o                                                       \
        opt.o                                                            \
        palette.o                                                        \
        parseutils.o                                                     \
        pixdesc.o                                                        \
        pixelutils.o                                                     \
+       quantize.o                                                       \
        random_seed.o                                                    \
        rational.o                                                       \
        refstruct.o                                                      \
@@ -292,6 +295,7 @@ TESTPROGS = adler32                                                     \
             pixdesc                                                     \
             pixelutils                                                  \
             pixfmt_best                                                 \
+            quantize                                                    \
             random_seed                                                 \
             rational                                                    \
             ripemd                                                      \
