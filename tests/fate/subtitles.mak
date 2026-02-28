@@ -61,6 +61,9 @@ fate-sub-mpsub-frames: CMD = fmtstdout ass -i $(TARGET_SAMPLES)/sub/MPSub_capabi
 FATE_SUBTITLES-$(call REMUX, SUP) += fate-sub-pgs-remux
 fate-sub-pgs-remux: CMD = transcode sup $(TARGET_SAMPLES)/sub/pgs_sub.sup sup "-copyts -c:s copy" "-copyts -c:s copy"
 
+FATE_SUBTITLES-$(call FRAMECRC, SUP, PGSSUB, PGSSUB_ENCODER) += fate-sub-pgs
+fate-sub-pgs: CMD = framecrc -i $(TARGET_SAMPLES)/sub/pgs_sub.sup -map s:0 -c pgssub
+
 FATE_SUBTITLES_ASS-$(call DEMDEC, PJS, PJS) += fate-sub-pjs
 fate-sub-pjs: CMD = fmtstdout ass -i $(TARGET_SAMPLES)/sub/PJS_capability_tester.pjs
 

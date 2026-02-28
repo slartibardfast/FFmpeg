@@ -632,6 +632,7 @@ OBJS-$(CONFIG_PGM_ENCODER)             += pnmenc.o
 OBJS-$(CONFIG_PGMYUV_DECODER)          += pnmdec.o pnm.o
 OBJS-$(CONFIG_PGMYUV_ENCODER)          += pnmenc.o
 OBJS-$(CONFIG_PGSSUB_DECODER)          += pgssubdec.o
+OBJS-$(CONFIG_PGSSUB_ENCODER)          += pgssubenc.o
 OBJS-$(CONFIG_PGX_DECODER)             += pgxdec.o
 OBJS-$(CONFIG_PHM_DECODER)             += pnmdec.o pnm.o
 OBJS-$(CONFIG_PHM_ENCODER)             += pnmenc.o
