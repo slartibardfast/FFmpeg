@@ -29,12 +29,12 @@
 #include "libavutil/internal.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
+#include "libavutil/palette.h"
 #include "libavutil/qsort.h"
 #include "avfilter.h"
 #include "filters.h"
 #include "formats.h"
 #include "framesync.h"
-#include "palette.h"
 #include "video.h"
 
 enum dithering_mode {
