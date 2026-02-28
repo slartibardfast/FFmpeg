@@ -2,6 +2,14 @@ The last version increases of all libraries were on 2025-03-28
 
 API changes, most recent first:
 
+2026-02-xx - xxxxxxxxxx - lavu 60.9.100 - quantize.h
+  Add color quantization API:
+    - Add av_quantize_alloc().
+    - Add av_quantize_freep().
+    - Add av_quantize_generate_palette().
+    - Add av_quantize_apply().
+    - Add enum AVQuantizeAlgorithm.
+
 2025-07-29 - 1c85a3832af - lavc 62.10.100 - smpte_436m.h
   Add a new public header smpte_436m.h with API for
   manipulating AV_CODEC_ID_SMPTE_436M_ANC data.
