@@ -19,13 +19,13 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef AVFILTER_PALETTE_H
-#define AVFILTER_PALETTE_H
+#ifndef AVUTIL_PALETTE_H
+#define AVUTIL_PALETTE_H
 
 #include <math.h>
 #include <stdint.h>
 
-#include "libavutil/attributes.h"
+#include "attributes.h"
 
 struct Lab {
     int32_t L, a, b;
@@ -54,4 +54,4 @@ uint32_t ff_oklab_int_to_srgb_u8(struct Lab c);
  */
 uint32_t ff_lowbias32(uint32_t x);
 
-#endif /* AVFILTER_PALETTE_H */
+#endif /* AVUTIL_PALETTE_H */
