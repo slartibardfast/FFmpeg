@@ -168,6 +168,7 @@ OBJS = adler32.o                                                        \
        neuquant.o                                                       \
        opt.o                                                            \
        palette.o                                                        \
+       palettemap.o                                                     \
        parseutils.o                                                     \
        pixdesc.o                                                        \
        pixelutils.o                                                     \
