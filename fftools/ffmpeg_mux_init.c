@@ -32,6 +32,7 @@
 #include "libavcodec/avcodec.h"
 
 #include "libavfilter/avfilter.h"
+#include "libavfilter/subtitle_render.h"
 
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
@@ -884,10 +885,24 @@ static int new_stream_subtitle(Muxer *mux, const OptionsContext *o,
         if (output_descriptor)
             output_props = output_descriptor->props & (AV_CODEC_PROP_TEXT_SUB | AV_CODEC_PROP_BITMAP_SUB);
         if (input_props && output_props && input_props != output_props) {
-            av_log(ost, AV_LOG_ERROR,
-                   "Subtitle encoding currently only possible from text to text "
-                   "or bitmap to bitmap\n");
-            return AVERROR(EINVAL);
+            if ((input_props & AV_CODEC_PROP_TEXT_SUB) &&
+                (output_props & AV_CODEC_PROP_BITMAP_SUB)) {
+                /* Text-to-bitmap conversion handled by subtitle renderer */
+                AVSubtitleRenderContext *test =
+                    avfilter_subtitle_render_alloc(1, 1);
+                if (!test) {
+                    av_log(ost, AV_LOG_ERROR,
+                           "Text to bitmap subtitle conversion requires "
+                           "libass (configure with --enable-libass)\n");
+                    return AVERROR(ENOSYS);
+                }
+                avfilter_subtitle_render_freep(&test);
+            } else {
+                av_log(ost, AV_LOG_ERROR,
+                       "Subtitle encoding currently only possible from "
+                       "text to text or bitmap to bitmap\n");
+                return AVERROR(EINVAL);
+            }
         }
     }
 
