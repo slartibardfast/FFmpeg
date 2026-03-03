@@ -38,6 +38,10 @@
 
 #include "libavcodec/avcodec.h"
 
+#include "libavfilter/subtitle_render.h"
+
+#include "libavutil/quantize.h"
+
 typedef struct EncoderPriv {
     Encoder        e;
 
@@ -55,6 +59,8 @@ typedef struct EncoderPriv {
 
     Scheduler      *sch;
     unsigned        sch_idx;
+
+    AVSubtitleRenderContext *sub_render;
 } EncoderPriv;
 
 static EncoderPriv *ep_from_enc(Encoder *enc)
@@ -71,9 +77,13 @@ typedef struct EncoderThread {
 void enc_free(Encoder **penc)
 {
     Encoder *enc = *penc;
+    EncoderPriv *ep;
 
     if (!enc)
         return;
+
+    ep = ep_from_enc(enc);
+    avfilter_subtitle_render_freep(&ep->sub_render);
 
     if (enc->enc_ctx)
         av_freep(&enc->enc_ctx->stats_in);
@@ -376,7 +386,399 @@ static int check_recording_time(OutputStream *ost, int64_t ts, AVRational tb)
     return 1;
 }
 
-static int do_subtitle_out(OutputFile *of, OutputStream *ost, const AVSubtitle *sub,
+/**
+ * Find the largest horizontal transparent gap in an RGBA bitmap.
+ * Returns 1 if a gap suitable for splitting was found, 0 otherwise.
+ */
+static int find_transparent_gap(const uint8_t *rgba, int stride,
+                                int w, int h,
+                                int *gap_start, int *gap_end)
+{
+    int best_start = -1, best_len = 0;
+    int cur_start = -1, cur_len = 0;
+    int y, x;
+
+    for (y = 0; y < h; y++) {
+        const uint8_t *row = rgba + y * stride;
+        int transparent = 1;
+
+        for (x = 0; x < w; x++) {
+            if (row[x * 4 + 3] != 0) {
+                transparent = 0;
+                break;
+            }
+        }
+
+        if (transparent) {
+            if (cur_start < 0)
+                cur_start = y;
+            cur_len++;
+        } else {
+            if (cur_len > best_len) {
+                best_start = cur_start;
+                best_len   = cur_len;
+            }
+            cur_start = -1;
+            cur_len   = 0;
+        }
+    }
+    if (cur_len > best_len) {
+        best_start = cur_start;
+        best_len   = cur_len;
+    }
+
+    /* Only split if gap is significant and has content on both sides */
+    if (best_len >= 32 && best_start > 0 && best_start + best_len < h) {
+        *gap_start = best_start;
+        *gap_end   = best_start + best_len;
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * Fill an AVSubtitleRect from pre-quantized palette and indices.
+ * The indices_region must point to rw*rh contiguous bytes.
+ */
+static int fill_rect_bitmap(AVSubtitleRect *rect,
+                             const uint8_t *indices_region,
+                             const uint32_t *palette, int nb_colors,
+                             int rx, int ry, int rw, int rh)
+{
+    int nb_pixels = (int)FFMIN((int64_t)rw * rh, INT_MAX);
+
+    rect->type       = SUBTITLE_BITMAP;
+    rect->x          = rx;
+    rect->y          = ry;
+    rect->w          = rw;
+    rect->h          = rh;
+    rect->nb_colors  = nb_colors;
+
+    rect->data[0] = av_memdup(indices_region, nb_pixels);
+    if (!rect->data[0])
+        return AVERROR(ENOMEM);
+    rect->linesize[0] = rw;
+
+    rect->data[1] = av_memdup(palette, 256 * 4);
+    if (!rect->data[1]) {
+        av_freep(&rect->data[0]);
+        return AVERROR(ENOMEM);
+    }
+    rect->linesize[1] = nb_colors * 4;
+
+    return 0;
+}
+
+/**
+ * Quantize an RGBA region and fill an AVSubtitleRect as SUBTITLE_BITMAP.
+ */
+static int quantize_rgba_to_rect(AVSubtitleRect *rect,
+                                 const uint8_t *rgba,
+                                 int rx, int ry, int rw, int rh)
+{
+    AVQuantizeContext *qctx;
+    uint32_t palette[256] = {0};
+    uint8_t *indices;
+    int nb_pixels = (int)FFMIN((int64_t)rw * rh, INT_MAX);
+    int nb_colors, ret;
+
+    qctx = av_quantize_alloc(AV_QUANTIZE_NEUQUANT, 256);
+    if (!qctx)
+        return AVERROR(ENOMEM);
+
+    nb_colors = av_quantize_generate_palette(qctx, rgba, nb_pixels,
+                                             palette, 10);
+    if (nb_colors < 0) {
+        av_quantize_freep(&qctx);
+        return nb_colors;
+    }
+
+    indices = av_malloc(nb_pixels);
+    if (!indices) {
+        av_quantize_freep(&qctx);
+        return AVERROR(ENOMEM);
+    }
+
+    ret = av_quantize_apply(qctx, rgba, indices, nb_pixels);
+    av_quantize_freep(&qctx);
+    if (ret < 0) {
+        av_free(indices);
+        return ret;
+    }
+
+    rect->type       = SUBTITLE_BITMAP;
+    rect->x          = rx;
+    rect->y          = ry;
+    rect->w          = rw;
+    rect->h          = rh;
+    rect->nb_colors  = nb_colors;
+    rect->data[0]    = indices;
+    rect->linesize[0] = rw;
+
+    rect->data[1] = av_malloc(256 * 4);
+    if (!rect->data[1]) {
+        av_freep(&rect->data[0]);
+        return AVERROR(ENOMEM);
+    }
+    memcpy(rect->data[1], palette, 256 * 4);
+    rect->linesize[1] = nb_colors * 4;
+
+    return 0;
+}
+
+/**
+ * Lazy-init the subtitle rendering context for text-to-bitmap conversion.
+ */
+static int ensure_render_context(EncoderPriv *ep, OutputStream *ost)
+{
+    AVCodecContext *enc_ctx = ep->e.enc_ctx;
+
+    if (ep->sub_render)
+        return 0;
+
+    if (enc_ctx->width <= 0 || enc_ctx->height <= 0) {
+        av_log(&ep->e, AV_LOG_ERROR,
+               "Canvas size required for text to bitmap subtitle "
+               "conversion (use -s WxH)\n");
+        return AVERROR(EINVAL);
+    }
+
+    ep->sub_render = avfilter_subtitle_render_alloc(enc_ctx->width,
+                                                    enc_ctx->height);
+    if (!ep->sub_render)
+        return AVERROR(ENOMEM);
+
+    if (enc_ctx->subtitle_header)
+        avfilter_subtitle_render_set_header(
+            ep->sub_render,
+            (const char *)enc_ctx->subtitle_header);
+
+    /* Load fonts from input file attachments */
+    if (ost->ist && ost->ist->file) {
+        AVFormatContext *fmt = ost->ist->file->ctx;
+        for (int j = 0; j < fmt->nb_streams; j++) {
+            AVStream *st = fmt->streams[j];
+            const AVDictionaryEntry *tag;
+
+            if (st->codecpar->codec_type != AVMEDIA_TYPE_ATTACHMENT)
+                continue;
+            if (!st->codecpar->extradata_size)
+                continue;
+            tag = av_dict_get(st->metadata, "filename", NULL,
+                              AV_DICT_MATCH_CASE);
+            if (!tag)
+                continue;
+            avfilter_subtitle_render_add_font(
+                ep->sub_render, tag->value,
+                st->codecpar->extradata,
+                st->codecpar->extradata_size);
+        }
+    }
+
+    return 0;
+}
+
+static int convert_text_to_bitmap(EncoderPriv *ep, OutputStream *ost,
+                                  AVSubtitle *sub)
+{
+    AVCodecContext *enc_ctx = ep->e.enc_ctx;
+    const AVCodecDescriptor *enc_desc;
+    int need_convert = 0;
+    unsigned i;
+    int ret;
+
+    enc_desc = avcodec_descriptor_get(enc_ctx->codec_id);
+    if (!enc_desc || !(enc_desc->props & AV_CODEC_PROP_BITMAP_SUB))
+        return 0;
+
+    for (i = 0; i < sub->num_rects; i++) {
+        if (sub->rects[i]->type == SUBTITLE_ASS ||
+            sub->rects[i]->type == SUBTITLE_TEXT) {
+            need_convert = 1;
+            break;
+        }
+    }
+    if (!need_convert)
+        return 0;
+
+    ret = ensure_render_context(ep, ost);
+    if (ret < 0)
+        return ret;
+
+    for (i = 0; i < sub->num_rects; i++) {
+        AVSubtitleRect *rect = sub->rects[i];
+        const char *text;
+        uint8_t *rgba = NULL;
+        int linesize, rx, ry, rw, rh;
+        int64_t start_ms, duration_ms;
+        int gap_start, gap_end;
+
+        if (rect->type != SUBTITLE_ASS && rect->type != SUBTITLE_TEXT)
+            continue;
+
+        text = rect->ass ? rect->ass : rect->text;
+        if (!text || !text[0])
+            continue;
+
+        start_ms    = sub->start_display_time;
+        duration_ms = sub->end_display_time - sub->start_display_time;
+
+        ret = avfilter_subtitle_render_frame(ep->sub_render, text,
+                                             start_ms, duration_ms,
+                                             &rgba, &linesize,
+                                             &rx, &ry, &rw, &rh);
+        if (ret < 0)
+            return ret;
+        if (!rgba)
+            continue; /* empty render */
+
+        av_freep(&rect->ass);
+        av_freep(&rect->text);
+
+        /* Quantize the full RGBA first, then optionally split.  Both
+         * halves must share one palette because PGS uses a single
+         * Palette Definition Segment per Display Set. */
+        {
+            AVQuantizeContext *qctx;
+            uint32_t pal[256] = {0};
+            uint8_t *indices;
+            int nb_pixels = rw * rh;
+            int nc;
+
+            qctx = av_quantize_alloc(AV_QUANTIZE_NEUQUANT, 256);
+            if (!qctx) {
+                av_free(rgba);
+                return AVERROR(ENOMEM);
+            }
+
+            nc = av_quantize_generate_palette(qctx, rgba, nb_pixels, pal, 10);
+            if (nc < 0) {
+                av_quantize_freep(&qctx);
+                av_free(rgba);
+                return nc;
+            }
+
+            indices = av_malloc(nb_pixels);
+            if (!indices) {
+                av_quantize_freep(&qctx);
+                av_free(rgba);
+                return AVERROR(ENOMEM);
+            }
+
+            ret = av_quantize_apply(qctx, rgba, indices, nb_pixels);
+            av_quantize_freep(&qctx);
+            if (ret < 0) {
+                av_free(indices);
+                av_free(rgba);
+                return ret;
+            }
+
+            if (sub->num_rects < 2 &&
+                find_transparent_gap(rgba, linesize, rw, rh,
+                                     &gap_start, &gap_end)) {
+                AVSubtitleRect *bot_rect;
+                AVSubtitleRect **new_rects;
+                int top_h = gap_start;
+                int bot_h = rh - gap_end;
+
+                new_rects = av_realloc_array(sub->rects, sub->num_rects + 1,
+                                             sizeof(*sub->rects));
+                if (!new_rects) {
+                    av_free(indices);
+                    av_free(rgba);
+                    return AVERROR(ENOMEM);
+                }
+                sub->rects = new_rects;
+
+                bot_rect = av_mallocz(sizeof(*bot_rect));
+                if (!bot_rect) {
+                    av_free(indices);
+                    av_free(rgba);
+                    return AVERROR(ENOMEM);
+                }
+                sub->rects[sub->num_rects] = bot_rect;
+                sub->num_rects++;
+
+                ret = fill_rect_bitmap(rect, indices, pal, nc,
+                                       rx, ry, rw, top_h);
+                if (ret < 0) {
+                    av_free(indices);
+                    av_free(rgba);
+                    return ret;
+                }
+
+                ret = fill_rect_bitmap(bot_rect, indices + gap_end * rw,
+                                       pal, nc, rx, ry + gap_end, rw, bot_h);
+                av_free(indices);
+                av_free(rgba);
+                if (ret < 0)
+                    return ret;
+            } else {
+                /* No split -- single rect, transfer indices ownership */
+                rect->type       = SUBTITLE_BITMAP;
+                rect->x          = rx;
+                rect->y          = ry;
+                rect->w          = rw;
+                rect->h          = rh;
+                rect->nb_colors  = nc;
+                rect->data[0]    = indices;
+                rect->linesize[0] = rw;
+                rect->data[1] = av_malloc(256 * 4);
+                if (!rect->data[1]) {
+                    av_free(rgba);
+                    return AVERROR(ENOMEM);
+                }
+                memcpy(rect->data[1], pal, 256 * 4);
+                rect->linesize[1] = nc * 4;
+                av_free(rgba);
+            }
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Encode a single subtitle frame (one avcodec_encode_subtitle call)
+ * and send the resulting packet to the muxer.
+ */
+static int encode_subtitle_packet(EncoderPriv *ep, AVCodecContext *enc,
+                                  AVSubtitle *sub, int64_t pts,
+                                  AVPacket *pkt)
+{
+    int subtitle_out_max_size = 1024 * 1024;
+    int subtitle_out_size, ret;
+
+    ret = av_new_packet(pkt, subtitle_out_max_size);
+    if (ret < 0)
+        return AVERROR(ENOMEM);
+
+    ep->e.frames_encoded++;
+
+    subtitle_out_size = avcodec_encode_subtitle(enc, pkt->data, pkt->size, sub);
+    if (subtitle_out_size < 0) {
+        av_log(&ep->e, AV_LOG_FATAL, "Subtitle encoding failed\n");
+        av_packet_unref(pkt);
+        return subtitle_out_size;
+    }
+
+    av_shrink_packet(pkt, subtitle_out_size);
+    pkt->time_base = AV_TIME_BASE_Q;
+    pkt->pts       = pts;
+    pkt->dts       = pts;
+    pkt->duration  = av_rescale_q(sub->end_display_time,
+                                  (AVRational){ 1, 1000 },
+                                  pkt->time_base);
+
+    ret = sch_enc_send(ep->sch, ep->sch_idx, pkt);
+    if (ret < 0) {
+        av_packet_unref(pkt);
+        return ret;
+    }
+    return 0;
+}
+
+static int do_subtitle_out(OutputFile *of, OutputStream *ost, AVSubtitle *sub,
                            AVPacket *pkt)
 {
     Encoder *e = ost->enc;
@@ -394,6 +796,11 @@ static int do_subtitle_out(OutputFile *of, OutputStream *ost, const AVSubtitle *
         return 0;
 
     enc = e->enc_ctx;
+
+    /* Convert text subtitles to bitmap if encoder requires it */
+    ret = convert_text_to_bitmap(ep, ost, sub);
+    if (ret < 0)
+        return ret;
 
     /* Note: DVB subtitle need one packet to draw them and one other
        packet to clear them */
@@ -787,8 +1194,8 @@ static int frame_encode(OutputStream *ost, AVFrame *frame, AVPacket *pkt)
     enum AVMediaType type = ost->type;
 
     if (type == AVMEDIA_TYPE_SUBTITLE) {
-        const AVSubtitle *subtitle = frame && frame->buf[0] ?
-                                     (AVSubtitle*)frame->buf[0]->data : NULL;
+        AVSubtitle *subtitle = frame && frame->buf[0] ?
+                               (AVSubtitle*)frame->buf[0]->data : NULL;
 
         // no flushing for subtitles
         return subtitle && subtitle->num_rects ?
