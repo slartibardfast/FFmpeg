@@ -3,7 +3,7 @@ APITESTPROGS-$(call DEMDEC, H264, H264) += api-h264
 APITESTPROGS-$(call DEMDEC, H264, H264) += api-h264-slice
 APITESTPROGS-yes += api-seek api-dump-stream-meta
 APITESTPROGS-$(call DEMDEC, H263, H263) += api-band
-APITESTPROGS-$(CONFIG_PGSSUB_ENCODER) += api-pgs-fade api-pgs-animation-util api-pgs-animation-timing api-pgs-rectsplit
+APITESTPROGS-$(CONFIG_PGSSUB_ENCODER) += api-pgs-fade api-pgs-animation-util api-pgs-animation-timing api-pgs-coalesce api-pgs-rectsplit
 APITESTPROGS-$(HAVE_THREADS) += api-threadmessage
 APITESTPROGS += $(APITESTPROGS-yes)
 

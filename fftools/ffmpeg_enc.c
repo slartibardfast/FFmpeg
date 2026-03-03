@@ -63,6 +63,19 @@ typedef struct EncoderPriv {
     unsigned        sch_idx;
 
     AVSubtitleRenderContext *sub_render;
+
+    /* Coalescing buffer for overlapping text subtitle events.
+     * Multiple ASS Dialogue lines with the same PTS are buffered
+     * here and rendered as a single composite before encoding. */
+    struct {
+        char    **texts;
+        int64_t  *durations;
+        int       nb;
+        int       cap;
+        int64_t   pts;
+        uint32_t  start_display_time;
+        uint32_t  end_display_time;
+    } sub_coalesce;
 } EncoderPriv;
 
 static EncoderPriv *ep_from_enc(Encoder *enc)
@@ -85,6 +98,10 @@ void enc_free(Encoder **penc)
         return;
 
     ep = ep_from_enc(enc);
+    for (int i = 0; i < ep->sub_coalesce.nb; i++)
+        av_freep(&ep->sub_coalesce.texts[i]);
+    av_freep(&ep->sub_coalesce.texts);
+    av_freep(&ep->sub_coalesce.durations);
     avfilter_subtitle_render_freep(&ep->sub_render);
 
     if (enc->enc_ctx)
@@ -379,56 +396,6 @@ static int check_recording_time(OutputStream *ost, int64_t ts, AVRational tb)
         return 0;
     }
     return 1;
-}
-
-/**
- * Find the largest horizontal transparent gap in an RGBA bitmap.
- * Returns 1 if a gap suitable for splitting was found, 0 otherwise.
- */
-static int find_transparent_gap(const uint8_t *rgba, int stride,
-                                int w, int h,
-                                int *gap_start, int *gap_end)
-{
-    int best_start = -1, best_len = 0;
-    int cur_start = -1, cur_len = 0;
-    int y, x;
-
-    for (y = 0; y < h; y++) {
-        const uint8_t *row = rgba + y * stride;
-        int transparent = 1;
-
-        for (x = 0; x < w; x++) {
-            if (row[x * 4 + 3] != 0) {
-                transparent = 0;
-                break;
-            }
-        }
-
-        if (transparent) {
-            if (cur_start < 0)
-                cur_start = y;
-            cur_len++;
-        } else {
-            if (cur_len > best_len) {
-                best_start = cur_start;
-                best_len   = cur_len;
-            }
-            cur_start = -1;
-            cur_len   = 0;
-        }
-    }
-    if (cur_len > best_len) {
-        best_start = cur_start;
-        best_len   = cur_len;
-    }
-
-    /* Only split if gap is significant and has content on both sides */
-    if (best_len >= 32 && best_start > 0 && best_start + best_len < h) {
-        *gap_start = best_start;
-        *gap_end   = best_start + best_len;
-        return 1;
-    }
-    return 0;
 }
 
 /**
@@ -783,7 +750,7 @@ static int encode_subtitle_packet(EncoderPriv *ep, AVCodecContext *enc,
  */
 static int do_subtitle_out_animated(OutputFile *of, OutputStream *ost,
                                     AVSubtitle *sub, AVPacket *pkt,
-                                    const char *text)
+                                    const char *text, int events_loaded)
 {
     Encoder *e = ost->enc;
     EncoderPriv *ep = ep_from_enc(e);
@@ -832,10 +799,12 @@ static int do_subtitle_out_animated(OutputFile *of, OutputStream *ost,
 
     /* --- Pass 1: Scan all frames, classify, find peak alpha --- */
 
-    ret = avfilter_subtitle_render_init_event(ep->sub_render, text,
-                                              start_ms, duration_ms);
-    if (ret < 0)
-        return ret;
+    if (!events_loaded) {
+        ret = avfilter_subtitle_render_init_event(ep->sub_render, text,
+                                                  start_ms, duration_ms);
+        if (ret < 0)
+            return ret;
+    }
 
     /* Render first frame */
     ret = avfilter_subtitle_render_sample(ep->sub_render, start_ms,
@@ -1227,6 +1196,245 @@ fail:
     return ret;
 }
 
+/* -- Subtitle event coalescing ------------------------------------------- */
+
+static void sub_coalesce_reset(EncoderPriv *ep)
+{
+    for (int i = 0; i < ep->sub_coalesce.nb; i++)
+        av_freep(&ep->sub_coalesce.texts[i]);
+    ep->sub_coalesce.nb = 0;
+}
+
+static int sub_coalesce_append(EncoderPriv *ep, const char *text,
+                                int64_t duration, int64_t pts,
+                                uint32_t start_display_time,
+                                uint32_t end_display_time)
+{
+    if (ep->sub_coalesce.nb >= ep->sub_coalesce.cap) {
+        int new_cap = ep->sub_coalesce.cap ? ep->sub_coalesce.cap * 2 : 4;
+        void *tmp;
+
+        /* Grow both arrays. If the second realloc fails, cap is
+         * not updated so the next call retries both arrays. */
+        tmp = av_realloc_array(ep->sub_coalesce.texts,
+                               new_cap, sizeof(*ep->sub_coalesce.texts));
+        if (!tmp)
+            return AVERROR(ENOMEM);
+        ep->sub_coalesce.texts = tmp;
+
+        tmp = av_realloc_array(ep->sub_coalesce.durations,
+                               new_cap, sizeof(*ep->sub_coalesce.durations));
+        if (!tmp)
+            return AVERROR(ENOMEM);
+        ep->sub_coalesce.durations = tmp;
+
+        ep->sub_coalesce.cap = new_cap;
+    }
+
+    ep->sub_coalesce.texts[ep->sub_coalesce.nb] = av_strdup(text);
+    if (!ep->sub_coalesce.texts[ep->sub_coalesce.nb])
+        return AVERROR(ENOMEM);
+    ep->sub_coalesce.durations[ep->sub_coalesce.nb] = duration;
+
+    if (ep->sub_coalesce.nb == 0) {
+        ep->sub_coalesce.pts                = pts;
+        ep->sub_coalesce.start_display_time = start_display_time;
+        ep->sub_coalesce.end_display_time   = end_display_time;
+    } else {
+        if (end_display_time > ep->sub_coalesce.end_display_time)
+            ep->sub_coalesce.end_display_time = end_display_time;
+    }
+
+    ep->sub_coalesce.nb++;
+    return 0;
+}
+
+/**
+ * Flush buffered coalesced subtitle events.
+ *
+ * Renders all buffered events as a composite, quantizes, and encodes.
+ * For animated events, delegates to the multi-timepoint renderer.
+ */
+static int flush_coalesced_subtitles(OutputFile *of, OutputStream *ost,
+                                      AVPacket *pkt)
+{
+    Encoder *e = ost->enc;
+    EncoderPriv *ep = ep_from_enc(e);
+    AVCodecContext *enc = e->enc_ctx;
+    int64_t start_ms, duration_ms, pts;
+    int ret, i, has_animation = 0;
+    uint8_t *rgba = NULL;
+    int linesize, rx, ry, rw, rh;
+    int gap_start, gap_end;
+
+    AVSubtitle comp_sub;
+    AVSubtitleRect comp_rect  = {0};
+    AVSubtitleRect comp_rect2 = {0};
+    AVSubtitleRect *comp_rects[2] = { &comp_rect, &comp_rect2 };
+
+    if (ep->sub_coalesce.nb == 0)
+        return 0;
+
+    ret = ensure_render_context(ep, ost);
+    if (ret < 0)
+        goto cleanup;
+
+    start_ms    = ep->sub_coalesce.start_display_time;
+    duration_ms = ep->sub_coalesce.end_display_time -
+                  ep->sub_coalesce.start_display_time;
+
+    /* Load all events into render context */
+    ret = avfilter_subtitle_render_init_event(ep->sub_render,
+              ep->sub_coalesce.texts[0], start_ms,
+              ep->sub_coalesce.durations[0]);
+    if (ret < 0)
+        goto cleanup;
+
+    for (i = 1; i < ep->sub_coalesce.nb; i++) {
+        ret = avfilter_subtitle_render_add_event(ep->sub_render,
+                  ep->sub_coalesce.texts[i], start_ms,
+                  ep->sub_coalesce.durations[i]);
+        if (ret < 0)
+            goto cleanup;
+    }
+
+    /* Check if any text has animation override tags */
+    for (i = 0; i < ep->sub_coalesce.nb; i++) {
+        if (strchr(ep->sub_coalesce.texts[i], '{')) {
+            has_animation = 1;
+            break;
+        }
+    }
+
+    if (has_animation) {
+        AVSubtitle anim_sub = {0};
+        anim_sub.pts                = ep->sub_coalesce.pts;
+        anim_sub.start_display_time = ep->sub_coalesce.start_display_time;
+        anim_sub.end_display_time   = ep->sub_coalesce.end_display_time;
+        ret = do_subtitle_out_animated(of, ost, &anim_sub, pkt, NULL, 1);
+        goto cleanup;
+    }
+
+    /* Static path: render composite, quantize, encode */
+    ret = avfilter_subtitle_render_sample(ep->sub_render, start_ms,
+              &rgba, &linesize, &rx, &ry, &rw, &rh, NULL);
+    if (ret < 0)
+        goto cleanup;
+    if (!rgba) {
+        ret = 0;
+        goto cleanup;
+    }
+
+    pts = ep->sub_coalesce.pts;
+    if (of->start_time != AV_NOPTS_VALUE)
+        pts -= of->start_time;
+
+    if (!check_recording_time(ost, pts, AV_TIME_BASE_Q)) {
+        av_free(rgba);
+        ret = AVERROR_EOF;
+        goto cleanup;
+    }
+
+    /* Build composite subtitle for encoding */
+    memset(&comp_sub, 0, sizeof(comp_sub));
+    comp_sub.start_display_time = 0;
+    comp_sub.end_display_time   = duration_ms;
+    comp_sub.rects     = comp_rects;
+    comp_sub.num_rects = 1;
+
+    /* Quantize full RGBA first, then optionally split.  Both halves
+     * must share one palette (PGS: one PDS per Display Set). */
+    {
+        AVQuantizeContext *qctx;
+        uint32_t pal[256] = {0};
+        uint8_t *indices;
+        int nb_pixels = rw * rh;
+        int nc;
+
+        qctx = av_quantize_alloc(AV_QUANTIZE_NEUQUANT, 256);
+        if (!qctx) {
+            av_free(rgba);
+            ret = AVERROR(ENOMEM);
+            goto cleanup;
+        }
+
+        nc = av_quantize_generate_palette(qctx, rgba, nb_pixels, pal, 10);
+        if (nc < 0) {
+            av_quantize_freep(&qctx);
+            av_free(rgba);
+            ret = nc;
+            goto cleanup;
+        }
+
+        indices = av_malloc(nb_pixels);
+        if (!indices) {
+            av_quantize_freep(&qctx);
+            av_free(rgba);
+            ret = AVERROR(ENOMEM);
+            goto cleanup;
+        }
+
+        ret = av_quantize_apply(qctx, rgba, indices, nb_pixels);
+        av_quantize_freep(&qctx);
+        if (ret < 0) {
+            av_free(indices);
+            av_free(rgba);
+            goto cleanup;
+        }
+
+        if (find_transparent_gap(rgba, linesize, rw, rh,
+                                 &gap_start, &gap_end)) {
+            int top_h = gap_start;
+            int bot_h = rh - gap_end;
+
+            ret = fill_rect_bitmap(&comp_rect, indices, pal, nc,
+                                   rx, ry, rw, top_h);
+            if (ret < 0) {
+                av_free(indices);
+                av_free(rgba);
+                goto cleanup;
+            }
+
+            ret = fill_rect_bitmap(&comp_rect2, indices + gap_end * rw,
+                                   pal, nc, rx, ry + gap_end, rw, bot_h);
+            av_free(indices);
+            av_free(rgba);
+            if (ret < 0)
+                goto cleanup;
+
+            comp_sub.num_rects = 2;
+        } else {
+            comp_rect.type       = SUBTITLE_BITMAP;
+            comp_rect.x          = rx;
+            comp_rect.y          = ry;
+            comp_rect.w          = rw;
+            comp_rect.h          = rh;
+            comp_rect.nb_colors  = nc;
+            comp_rect.data[0]    = indices;
+            comp_rect.linesize[0] = rw;
+            comp_rect.data[1] = av_malloc(256 * 4);
+            if (!comp_rect.data[1]) {
+                av_free(rgba);
+                ret = AVERROR(ENOMEM);
+                goto cleanup;
+            }
+            memcpy(comp_rect.data[1], pal, 256 * 4);
+            comp_rect.linesize[1] = nc * 4;
+            av_free(rgba);
+        }
+    }
+
+    ret = encode_subtitle_packet(ep, enc, &comp_sub, pts, pkt);
+
+cleanup:
+    av_freep(&comp_rect.data[0]);
+    av_freep(&comp_rect.data[1]);
+    av_freep(&comp_rect2.data[0]);
+    av_freep(&comp_rect2.data[1]);
+    sub_coalesce_reset(ep);
+    return ret;
+}
+
 static int do_subtitle_out(OutputFile *of, OutputStream *ost, AVSubtitle *sub,
                            AVPacket *pkt)
 {
@@ -1246,18 +1454,36 @@ static int do_subtitle_out(OutputFile *of, OutputStream *ost, AVSubtitle *sub,
 
     enc = e->enc_ctx;
 
-    /* PGS animation: if ASS text contains override tags, use the
-     * multi-timepoint renderer to detect and encode animation
-     * (fades, motion, transforms) without parsing format-specific tags. */
-    if (enc->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE && sub->num_rects > 0) {
-        AVSubtitleRect *rect = sub->rects[0];
-        if (rect->type == SUBTITLE_ASS && rect->ass && strchr(rect->ass, '{')) {
-            ret = ensure_render_context(ep, ost);
+    /* Coalesce overlapping text subtitle events for PGS bitmap encoding.
+     * Multiple ASS Dialogue lines with the same PTS are buffered and
+     * rendered as a single composite before quantization and encoding. */
+    if (enc->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE &&
+        sub->num_rects > 0 &&
+        (sub->rects[0]->type == SUBTITLE_ASS ||
+         sub->rects[0]->type == SUBTITLE_TEXT)) {
+        const char *text = sub->rects[0]->ass ? sub->rects[0]->ass
+                                               : sub->rects[0]->text;
+        if (!text || !text[0])
+            return 0;
+
+        /* Flush pending events if PTS changed */
+        if (ep->sub_coalesce.nb > 0 && sub->pts != ep->sub_coalesce.pts) {
+            ret = flush_coalesced_subtitles(of, ost, pkt);
             if (ret < 0)
                 return ret;
-            return do_subtitle_out_animated(of, ost, sub, pkt, rect->ass);
         }
+
+        return sub_coalesce_append(ep, text,
+                    sub->end_display_time - sub->start_display_time,
+                    sub->pts,
+                    sub->start_display_time,
+                    sub->end_display_time);
     }
+
+    /* Flush any pending coalesced events before non-coalesced processing */
+    ret = flush_coalesced_subtitles(of, ost, pkt);
+    if (ret < 0)
+        return ret;
 
     /* Convert text subtitles to bitmap if encoder requires it */
     ret = convert_text_to_bitmap(ep, ost, sub);
@@ -1656,9 +1882,11 @@ static int frame_encode(OutputStream *ost, AVFrame *frame, AVPacket *pkt)
         AVSubtitle *subtitle = frame && frame->buf[0] ?
                                (AVSubtitle*)frame->buf[0]->data : NULL;
 
-        // no flushing for subtitles
-        return subtitle && subtitle->num_rects ?
-               do_subtitle_out(of, ost, subtitle, pkt) : 0;
+        if (subtitle && subtitle->num_rects)
+            return do_subtitle_out(of, ost, subtitle, pkt);
+
+        /* End of stream: flush any pending coalesced events */
+        return flush_coalesced_subtitles(of, ost, pkt);
     }
 
     if (frame) {
