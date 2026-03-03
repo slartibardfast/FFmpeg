@@ -127,33 +127,59 @@ int avfilter_subtitle_render_add_font(AVSubtitleRenderContext *ctx,
 #define ASS_B(c) (((c) >>  8) & 0xFF)
 #define ASS_A(c) (0xFF - ((c) & 0xFF))
 
-int avfilter_subtitle_render_frame(AVSubtitleRenderContext *ctx,
-                                    const char *text,
-                                    int64_t start_ms, int64_t duration_ms,
-                                    uint8_t **rgba, int *linesize,
-                                    int *x, int *y, int *w, int *h)
+int avfilter_subtitle_render_init_event(AVSubtitleRenderContext *ctx,
+                                         const char *text,
+                                         int64_t start_ms,
+                                         int64_t duration_ms)
+{
+    if (!ctx || !text)
+        return AVERROR(EINVAL);
+
+    ass_flush_events(ctx->track);
+    ass_process_chunk(ctx->track, (char *)text, strlen(text),
+                      start_ms, duration_ms);
+    return 0;
+}
+
+int avfilter_subtitle_render_add_event(AVSubtitleRenderContext *ctx,
+                                        const char *text,
+                                        int64_t start_ms,
+                                        int64_t duration_ms)
+{
+    if (!ctx || !text)
+        return AVERROR(EINVAL);
+
+    ass_process_chunk(ctx->track, (char *)text, strlen(text),
+                      start_ms, duration_ms);
+    return 0;
+}
+
+int avfilter_subtitle_render_sample(AVSubtitleRenderContext *ctx,
+                                     int64_t render_time_ms,
+                                     uint8_t **rgba, int *linesize,
+                                     int *x, int *y, int *w, int *h,
+                                     int *detect_change)
 {
     ASS_Image *images, *img;
-    int detect_change;
+    int dc;
     int x_min, y_min, x_max, y_max;
     int bw, bh, stride;
     uint8_t *buf;
 
-    if (!ctx || !text || !rgba || !linesize || !x || !y || !w || !h)
+    if (!ctx || !rgba || !linesize || !x || !y || !w || !h)
         return AVERROR(EINVAL);
 
     *rgba = NULL;
     *linesize = 0;
     *x = *y = *w = *h = 0;
+    if (detect_change)
+        *detect_change = 0;
 
-    /* Clear previous events and add the new one */
-    ass_flush_events(ctx->track);
-    ass_process_chunk(ctx->track, (char *)text, strlen(text),
-                      start_ms, duration_ms);
-
-    /* Render at event start time */
     images = ass_render_frame(ctx->renderer, ctx->track,
-                              start_ms, &detect_change);
+                              render_time_ms, &dc);
+    if (detect_change)
+        *detect_change = dc;
+
     if (!images)
         return 0; /* empty render is not an error */
 
@@ -250,6 +276,24 @@ int avfilter_subtitle_render_frame(AVSubtitleRenderContext *ctx,
     return 0;
 }
 
+int avfilter_subtitle_render_frame(AVSubtitleRenderContext *ctx,
+                                    const char *text,
+                                    int64_t start_ms, int64_t duration_ms,
+                                    uint8_t **rgba, int *linesize,
+                                    int *x, int *y, int *w, int *h)
+{
+    int ret;
+
+    ret = avfilter_subtitle_render_init_event(ctx, text,
+                                              start_ms, duration_ms);
+    if (ret < 0)
+        return ret;
+
+    return avfilter_subtitle_render_sample(ctx, start_ms,
+                                           rgba, linesize,
+                                           x, y, w, h, NULL);
+}
+
 #else /* !CONFIG_LIBASS */
 
 AVSubtitleRenderContext *avfilter_subtitle_render_alloc(int canvas_w,
@@ -280,6 +324,31 @@ int avfilter_subtitle_render_frame(AVSubtitleRenderContext *ctx,
                                     int64_t start_ms, int64_t duration_ms,
                                     uint8_t **rgba, int *linesize,
                                     int *x, int *y, int *w, int *h)
+{
+    return AVERROR(ENOSYS);
+}
+
+int avfilter_subtitle_render_init_event(AVSubtitleRenderContext *ctx,
+                                         const char *text,
+                                         int64_t start_ms,
+                                         int64_t duration_ms)
+{
+    return AVERROR(ENOSYS);
+}
+
+int avfilter_subtitle_render_add_event(AVSubtitleRenderContext *ctx,
+                                        const char *text,
+                                        int64_t start_ms,
+                                        int64_t duration_ms)
+{
+    return AVERROR(ENOSYS);
+}
+
+int avfilter_subtitle_render_sample(AVSubtitleRenderContext *ctx,
+                                     int64_t render_time_ms,
+                                     uint8_t **rgba, int *linesize,
+                                     int *x, int *y, int *w, int *h,
+                                     int *detect_change)
 {
     return AVERROR(ENOSYS);
 }
