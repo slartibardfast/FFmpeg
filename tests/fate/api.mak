@@ -26,6 +26,11 @@ fate-api-pgs-animation-util: $(APITESTSDIR)/api-pgs-animation-util-test$(EXESUF)
 fate-api-pgs-animation-util: CMD = run $(APITESTSDIR)/api-pgs-animation-util-test$(EXESUF)
 fate-api-pgs-animation-util: CMP = null
 
+FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-animation-timing
+fate-api-pgs-animation-timing: $(APITESTSDIR)/api-pgs-animation-timing-test$(EXESUF)
+fate-api-pgs-animation-timing: CMD = run $(APITESTSDIR)/api-pgs-animation-timing-test$(EXESUF)
+fate-api-pgs-animation-timing: CMP = null
+
 FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-rectsplit
 fate-api-pgs-rectsplit: $(APITESTSDIR)/api-pgs-rectsplit-test$(EXESUF)
 fate-api-pgs-rectsplit: CMD = run $(APITESTSDIR)/api-pgs-rectsplit-test$(EXESUF)

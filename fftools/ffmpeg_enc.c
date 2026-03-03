@@ -42,6 +42,8 @@
 
 #include "libavutil/quantize.h"
 
+#include "ffmpeg_subtitle_animation.c"
+
 typedef struct EncoderPriv {
     Encoder        e;
 
@@ -771,6 +773,460 @@ static int encode_subtitle_packet(EncoderPriv *ep, AVCodecContext *enc,
     return 0;
 }
 
+/**
+ * Animated subtitle encoding for PGS.
+ *
+ * Renders the event at every frame interval, classifies changes
+ * (alpha-only, position-only, or content), and encodes using the
+ * optimal PGS Display Set type for each frame. Format-agnostic:
+ * works with any text subtitle format by observing renderer output.
+ */
+static int do_subtitle_out_animated(OutputFile *of, OutputStream *ost,
+                                    AVSubtitle *sub, AVPacket *pkt,
+                                    const char *text)
+{
+    Encoder *e = ost->enc;
+    EncoderPriv *ep = ep_from_enc(e);
+    AVCodecContext *enc = e->enc_ctx;
+    int64_t start_ms, duration_ms, base_pts, pts;
+    int frame_ms, ret;
+    int64_t t;
+
+    /* Pass 1 scan state */
+    uint8_t *rgba0 = NULL;
+    int ls0, x0, y0, w0, h0;
+    int64_t peak_alpha, first_alpha;
+    int64_t peak_time;
+
+    /* Recorded animated frame timestamps */
+    int64_t *anim_times = NULL;
+    int n_anim = 0, anim_cap = 0;
+
+    enum SubtitleChangeType worst_change = SUB_CHANGE_NONE;
+
+    /* Encoding state */
+    AVSubtitle local_sub;
+    AVSubtitleRect local_rect;
+    AVSubtitleRect *local_rects[1];
+    uint32_t ref_palette[256];
+    uint32_t scaled_pal[256];
+    int nb_colors;
+
+    start_ms    = sub->start_display_time;
+    duration_ms = sub->end_display_time - sub->start_display_time;
+
+    if (duration_ms <= 0 || sub->pts == AV_NOPTS_VALUE)
+        return 0;
+
+    /* Frame interval from encoder framerate, fallback to ~24fps */
+    if (enc->framerate.num > 0 && enc->framerate.den > 0)
+        frame_ms = 1000 * enc->framerate.den / enc->framerate.num;
+    else
+        frame_ms = 42;
+    if (frame_ms < 1)
+        frame_ms = 1;
+
+    base_pts = sub->pts;
+    if (of->start_time != AV_NOPTS_VALUE)
+        base_pts -= of->start_time;
+
+    /* --- Pass 1: Scan all frames, classify, find peak alpha --- */
+
+    ret = avfilter_subtitle_render_init_event(ep->sub_render, text,
+                                              start_ms, duration_ms);
+    if (ret < 0)
+        return ret;
+
+    /* Render first frame */
+    ret = avfilter_subtitle_render_sample(ep->sub_render, start_ms,
+                                          &rgba0, &ls0,
+                                          &x0, &y0, &w0, &h0, NULL);
+    if (ret < 0)
+        return ret;
+    if (!rgba0)
+        return 0; /* empty render -- nothing to encode */
+
+    first_alpha = rgba_alpha_sum(rgba0, w0, h0, ls0);
+    peak_alpha  = first_alpha;
+    peak_time   = start_ms;
+
+    for (t = start_ms + frame_ms; t <= start_ms + duration_ms; t += frame_ms) {
+        uint8_t *rgba = NULL;
+        int ls, sx, sy, sw, sh, dc;
+        enum SubtitleChangeType change;
+
+        ret = avfilter_subtitle_render_sample(ep->sub_render, t,
+                                              &rgba, &ls,
+                                              &sx, &sy, &sw, &sh, &dc);
+        if (ret < 0)
+            goto fail;
+
+        if (dc == 0 && rgba) {
+            av_free(rgba);
+            continue;
+        }
+
+        if (!rgba) {
+            /* Became fully transparent -- treat as content change */
+            change = SUB_CHANGE_CONTENT;
+        } else {
+            int64_t cur_alpha;
+            change = classify_subtitle_change(rgba0, x0, y0, w0, h0, ls0,
+                                              rgba, sx, sy, sw, sh, ls);
+            cur_alpha = rgba_alpha_sum(rgba, sw, sh, ls);
+            if (cur_alpha > peak_alpha) {
+                peak_alpha = cur_alpha;
+                peak_time  = t;
+            }
+            av_free(rgba);
+        }
+
+        if (change > worst_change)
+            worst_change = change;
+
+        /* Record this timestamp */
+        if (n_anim >= anim_cap) {
+            int64_t *tmp;
+            anim_cap = anim_cap ? anim_cap * 2 : 64;
+            tmp = av_realloc_array(anim_times, anim_cap, sizeof(*anim_times));
+            if (!tmp) {
+                ret = AVERROR(ENOMEM);
+                goto fail;
+            }
+            anim_times = tmp;
+        }
+        anim_times[n_anim++] = t;
+    }
+
+    if (worst_change == SUB_CHANGE_NONE) {
+        /* Static subtitle -- quantize first frame, single encode */
+        memset(&local_rect, 0, sizeof(local_rect));
+        ret = quantize_rgba_to_rect(&local_rect, rgba0, x0, y0, w0, h0);
+        av_freep(&rgba0);
+        if (ret < 0)
+            goto fail;
+
+        local_rects[0] = &local_rect;
+        local_sub = *sub;
+        local_sub.num_rects = 1;
+        local_sub.rects = local_rects;
+        pts = base_pts + av_rescale_q(start_ms,
+                                      (AVRational){ 1, 1000 },
+                                      AV_TIME_BASE_Q);
+        local_sub.pts                = pts;
+        local_sub.end_display_time  -= sub->start_display_time;
+        local_sub.start_display_time = 0;
+
+        ret = encode_subtitle_packet(ep, enc, &local_sub, pts, pkt);
+        av_freep(&local_rect.data[0]);
+        av_freep(&local_rect.data[1]);
+        goto done;
+    }
+
+    av_freep(&rgba0);
+
+    /* --- Pass 2: Re-render and encode based on classification --- */
+
+    ret = avfilter_subtitle_render_init_event(ep->sub_render, text,
+                                              start_ms, duration_ms);
+    if (ret < 0)
+        goto fail;
+
+    if (worst_change == SUB_CHANGE_ALPHA) {
+        uint8_t *peak_rgba = NULL;
+        int peak_ls, px, py, pw, ph;
+        int alpha_pct, i;
+        int palette_updates = 0;
+
+        /* Render and quantize the peak frame as reference */
+        ret = avfilter_subtitle_render_sample(ep->sub_render, peak_time,
+                                              &peak_rgba, &peak_ls,
+                                              &px, &py, &pw, &ph, NULL);
+        if (ret < 0)
+            goto fail;
+        if (!peak_rgba) {
+            ret = 0;
+            goto done;
+        }
+
+        memset(&local_rect, 0, sizeof(local_rect));
+        ret = quantize_rgba_to_rect(&local_rect, peak_rgba, px, py, pw, ph);
+        av_free(peak_rgba);
+        if (ret < 0)
+            goto fail;
+
+        nb_colors = FFMIN(local_rect.nb_colors, 256);
+        memcpy(ref_palette, local_rect.data[1], nb_colors * 4);
+
+        /* Epoch Start with first frame's alpha (may be 0% for fade-in) */
+        {
+            uint8_t *first_rgba = NULL;
+            int fls, fx, fy, fw, fh;
+            int64_t fa;
+
+            ret = avfilter_subtitle_render_init_event(ep->sub_render, text,
+                                                      start_ms, duration_ms);
+            if (ret < 0)
+                goto fail_rect;
+            ret = avfilter_subtitle_render_sample(ep->sub_render, start_ms,
+                                                  &first_rgba, &fls,
+                                                  &fx, &fy, &fw, &fh, NULL);
+            if (ret < 0)
+                goto fail_rect;
+
+            if (first_rgba && peak_alpha > 0) {
+                fa = rgba_alpha_sum(first_rgba, fw, fh, fls);
+                alpha_pct = (int)(fa * 100 / peak_alpha);
+            } else {
+                alpha_pct = 0;
+            }
+            av_free(first_rgba);
+
+            scale_palette_alpha(ref_palette, scaled_pal, nb_colors, alpha_pct);
+            memcpy(local_rect.data[1], scaled_pal, nb_colors * 4);
+        }
+
+        local_rects[0] = &local_rect;
+        local_sub = *sub;
+        local_sub.num_rects = 1;
+        local_sub.rects = local_rects;
+        pts = base_pts + av_rescale_q(start_ms,
+                                      (AVRational){ 1, 1000 },
+                                      AV_TIME_BASE_Q);
+        local_sub.pts                = pts;
+        local_sub.end_display_time  -= sub->start_display_time;
+        local_sub.start_display_time = 0;
+
+        if (!check_recording_time(ost, base_pts, AV_TIME_BASE_Q))
+            goto done_rect;
+
+        ret = encode_subtitle_packet(ep, enc, &local_sub, pts, pkt);
+        if (ret < 0)
+            goto fail_rect;
+
+        /* Encode each animated frame with scaled palette */
+        for (i = 0; i < n_anim; i++) {
+            uint8_t *rgba = NULL;
+            int ls, sx, sy, sw, sh;
+            int64_t cur_alpha;
+
+            if (!check_recording_time(ost, base_pts, AV_TIME_BASE_Q))
+                break;
+
+            /* Palette version safety: reset epoch before wrapping */
+            if (palette_updates >= 254) {
+                memcpy(local_rect.data[1], ref_palette, nb_colors * 4);
+                pts = base_pts + av_rescale_q(anim_times[i],
+                                              (AVRational){ 1, 1000 },
+                                              AV_TIME_BASE_Q);
+                local_sub.pts = pts;
+                ret = encode_subtitle_packet(ep, enc, &local_sub, pts, pkt);
+                if (ret < 0)
+                    goto fail_rect;
+                palette_updates = 0;
+            }
+
+            ret = avfilter_subtitle_render_sample(ep->sub_render,
+                                                  anim_times[i],
+                                                  &rgba, &ls,
+                                                  &sx, &sy, &sw, &sh,
+                                                  NULL);
+            if (ret < 0)
+                goto fail_rect;
+            if (!rgba)
+                continue;
+
+            cur_alpha = rgba_alpha_sum(rgba, sw, sh, ls);
+            av_free(rgba);
+
+            alpha_pct = peak_alpha > 0
+                        ? (int)(cur_alpha * 100 / peak_alpha) : 0;
+            scale_palette_alpha(ref_palette, scaled_pal, nb_colors, alpha_pct);
+            memcpy(local_rect.data[1], scaled_pal, nb_colors * 4);
+
+            pts = base_pts + av_rescale_q(anim_times[i],
+                                          (AVRational){ 1, 1000 },
+                                          AV_TIME_BASE_Q);
+            local_sub.pts = pts;
+            ret = encode_subtitle_packet(ep, enc, &local_sub, pts, pkt);
+            if (ret < 0)
+                goto fail_rect;
+            palette_updates++;
+        }
+
+done_rect:
+        av_freep(&local_rect.data[0]);
+        av_freep(&local_rect.data[1]);
+    } else if (worst_change == SUB_CHANGE_POSITION) {
+        uint8_t *first_rgba = NULL;
+        int fls, fx, fy, fw, fh, i;
+
+        /* Quantize first frame (all frames have same bitmap) */
+        ret = avfilter_subtitle_render_sample(ep->sub_render, start_ms,
+                                              &first_rgba, &fls,
+                                              &fx, &fy, &fw, &fh, NULL);
+        if (ret < 0)
+            goto fail;
+        if (!first_rgba) {
+            ret = 0;
+            goto done;
+        }
+
+        memset(&local_rect, 0, sizeof(local_rect));
+        ret = quantize_rgba_to_rect(&local_rect, first_rgba, fx, fy, fw, fh);
+        av_free(first_rgba);
+        if (ret < 0)
+            goto fail;
+
+        local_rects[0] = &local_rect;
+        local_sub = *sub;
+        local_sub.num_rects = 1;
+        local_sub.rects = local_rects;
+        pts = base_pts + av_rescale_q(start_ms,
+                                      (AVRational){ 1, 1000 },
+                                      AV_TIME_BASE_Q);
+        local_sub.pts                = pts;
+        local_sub.end_display_time  -= sub->start_display_time;
+        local_sub.start_display_time = 0;
+
+        if (!check_recording_time(ost, base_pts, AV_TIME_BASE_Q))
+            goto done_pos;
+
+        ret = encode_subtitle_packet(ep, enc, &local_sub, pts, pkt);
+        if (ret < 0)
+            goto fail_pos;
+
+        for (i = 0; i < n_anim; i++) {
+            uint8_t *rgba = NULL;
+            int ls, sx, sy, sw, sh;
+
+            if (!check_recording_time(ost, base_pts, AV_TIME_BASE_Q))
+                break;
+
+            ret = avfilter_subtitle_render_sample(ep->sub_render,
+                                                  anim_times[i],
+                                                  &rgba, &ls,
+                                                  &sx, &sy, &sw, &sh,
+                                                  NULL);
+            if (ret < 0)
+                goto fail_pos;
+            av_free(rgba);
+
+            local_rect.x = sx;
+            local_rect.y = sy;
+
+            pts = base_pts + av_rescale_q(anim_times[i],
+                                          (AVRational){ 1, 1000 },
+                                          AV_TIME_BASE_Q);
+            local_sub.pts = pts;
+            ret = encode_subtitle_packet(ep, enc, &local_sub, pts, pkt);
+            if (ret < 0)
+                goto fail_pos;
+        }
+
+done_pos:
+        av_freep(&local_rect.data[0]);
+        av_freep(&local_rect.data[1]);
+    } else {
+        /* CONTENT: each frame gets independent quantization */
+        uint8_t *first_rgba = NULL;
+        int fls, fx, fy, fw, fh, i;
+
+        ret = avfilter_subtitle_render_sample(ep->sub_render, start_ms,
+                                              &first_rgba, &fls,
+                                              &fx, &fy, &fw, &fh, NULL);
+        if (ret < 0)
+            goto fail;
+        if (!first_rgba) {
+            ret = 0;
+            goto done;
+        }
+
+        memset(&local_rect, 0, sizeof(local_rect));
+        ret = quantize_rgba_to_rect(&local_rect, first_rgba, fx, fy, fw, fh);
+        av_free(first_rgba);
+        if (ret < 0)
+            goto fail;
+
+        local_rects[0] = &local_rect;
+        local_sub = *sub;
+        local_sub.num_rects = 1;
+        local_sub.rects = local_rects;
+        pts = base_pts + av_rescale_q(start_ms,
+                                      (AVRational){ 1, 1000 },
+                                      AV_TIME_BASE_Q);
+        local_sub.pts                = pts;
+        local_sub.end_display_time  -= sub->start_display_time;
+        local_sub.start_display_time = 0;
+
+        if (!check_recording_time(ost, base_pts, AV_TIME_BASE_Q))
+            goto done_content;
+
+        ret = encode_subtitle_packet(ep, enc, &local_sub, pts, pkt);
+        if (ret < 0)
+            goto fail_content;
+
+        for (i = 0; i < n_anim; i++) {
+            uint8_t *rgba = NULL;
+            int ls, sx, sy, sw, sh;
+
+            if (!check_recording_time(ost, base_pts, AV_TIME_BASE_Q))
+                break;
+
+            ret = avfilter_subtitle_render_sample(ep->sub_render,
+                                                  anim_times[i],
+                                                  &rgba, &ls,
+                                                  &sx, &sy, &sw, &sh,
+                                                  NULL);
+            if (ret < 0)
+                goto fail_content;
+            if (!rgba)
+                continue;
+
+            av_freep(&local_rect.data[0]);
+            av_freep(&local_rect.data[1]);
+            memset(&local_rect, 0, sizeof(local_rect));
+            ret = quantize_rgba_to_rect(&local_rect, rgba, sx, sy, sw, sh);
+            av_free(rgba);
+            if (ret < 0)
+                goto fail;
+
+            pts = base_pts + av_rescale_q(anim_times[i],
+                                          (AVRational){ 1, 1000 },
+                                          AV_TIME_BASE_Q);
+            local_sub.pts = pts;
+            ret = encode_subtitle_packet(ep, enc, &local_sub, pts, pkt);
+            if (ret < 0)
+                goto fail_content;
+        }
+
+done_content:
+        av_freep(&local_rect.data[0]);
+        av_freep(&local_rect.data[1]);
+    }
+
+done:
+    av_freep(&anim_times);
+    av_freep(&rgba0);
+    return 0;
+
+fail_rect:
+    av_freep(&local_rect.data[0]);
+    av_freep(&local_rect.data[1]);
+    goto fail;
+fail_pos:
+    av_freep(&local_rect.data[0]);
+    av_freep(&local_rect.data[1]);
+    goto fail;
+fail_content:
+    av_freep(&local_rect.data[0]);
+    av_freep(&local_rect.data[1]);
+fail:
+    av_freep(&anim_times);
+    av_freep(&rgba0);
+    return ret;
+}
+
 static int do_subtitle_out(OutputFile *of, OutputStream *ost, AVSubtitle *sub,
                            AVPacket *pkt)
 {
@@ -789,6 +1245,19 @@ static int do_subtitle_out(OutputFile *of, OutputStream *ost, AVSubtitle *sub,
         return 0;
 
     enc = e->enc_ctx;
+
+    /* PGS animation: if ASS text contains override tags, use the
+     * multi-timepoint renderer to detect and encode animation
+     * (fades, motion, transforms) without parsing format-specific tags. */
+    if (enc->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE && sub->num_rects > 0) {
+        AVSubtitleRect *rect = sub->rects[0];
+        if (rect->type == SUBTITLE_ASS && rect->ass && strchr(rect->ass, '{')) {
+            ret = ensure_render_context(ep, ost);
+            if (ret < 0)
+                return ret;
+            return do_subtitle_out_animated(of, ost, sub, pkt, rect->ass);
+        }
+    }
 
     /* Convert text subtitles to bitmap if encoder requires it */
     ret = convert_text_to_bitmap(ep, ost, sub);
