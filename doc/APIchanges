@@ -9,6 +9,9 @@ API changes, most recent first:
     - Add avfilter_subtitle_render_set_header().
     - Add avfilter_subtitle_render_add_font().
     - Add avfilter_subtitle_render_frame().
+    - Add avfilter_subtitle_render_init_event().
+    - Add avfilter_subtitle_render_add_event().
+    - Add avfilter_subtitle_render_sample().
 
 2026-02-xx - xxxxxxxxxx - lavu 60.9.100 - quantize.h
   Add color quantization API:
