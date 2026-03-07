@@ -33,6 +33,8 @@
 #include "libavutil/imgutils_internal.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
+#include "libavutil/palettemap.h"
+#include "libavutil/quantize.h"
 #include "avcodec.h"
 #include "bytestream.h"
 #include "codec_internal.h"
@@ -56,6 +58,11 @@ typedef struct GIFContext {
     int palette_loaded;
     int transparent_index;
     uint8_t *tmpl;                      ///< temporary line buffer
+
+    /* RGBA quantization (when input is AV_PIX_FMT_RGBA) */
+    int quantize_method;
+    int dither;
+    AVFrame *rgba_pal8;                 ///< quantized PAL8 frame for RGBA input
 } GIFContext;
 
 enum {
@@ -447,6 +454,107 @@ static int gif_image_write_image(AVCodecContext *avctx,
     return 0;
 }
 
+/**
+ * Quantize an RGBA frame to PAL8 with dithering.
+ *
+ * Generates a 256-color palette from the RGBA input, reserves one entry
+ * for transparency, then maps pixels to indices using the selected
+ * dithering algorithm.
+ *
+ * @param avctx    encoder context
+ * @param rgba     input RGBA frame (AV_PIX_FMT_RGBA)
+ * @param pal8     output PAL8 frame (allocated by caller)
+ * @return 0 on success, negative AVERROR on failure
+ */
+static int gif_quantize_rgba(AVCodecContext *avctx,
+                              const AVFrame *rgba, AVFrame *pal8)
+{
+    GIFContext *s = avctx->priv_data;
+    AVQuantizeContext *qctx;
+    FFPaletteMapContext *map_ctx;
+    uint32_t pal[AVPALETTE_COUNT] = {0};
+    uint32_t *argb_buf;
+    int w = avctx->width, h = avctx->height;
+    int nb_pixels, nb_colors, ret, has_transparency = 0;
+
+    if ((int64_t)w * h > INT_MAX)
+        return AVERROR(EINVAL);
+    nb_pixels = w * h;
+
+    /* Copy RGBA to contiguous buffer (linesize may include padding) */
+    argb_buf = av_malloc_array(nb_pixels, sizeof(uint32_t));
+    if (!argb_buf)
+        return AVERROR(ENOMEM);
+
+    for (int y = 0; y < h; y++) {
+        const uint8_t *src = rgba->data[0] + y * rgba->linesize[0];
+        memcpy((uint8_t *)(argb_buf + y * w), src, w * 4);
+        for (int x = 0; x < w; x++) {
+            if (src[x * 4 + 3] < 128) {
+                has_transparency = 1;
+                break;
+            }
+        }
+    }
+
+    /* Generate palette from contiguous RGBA bytes */
+    qctx = av_quantize_alloc(s->quantize_method, 255);
+    if (!qctx) {
+        av_free(argb_buf);
+        return AVERROR(ENOMEM);
+    }
+
+    nb_colors = av_quantize_generate_palette(qctx, (const uint8_t *)argb_buf,
+                                              nb_pixels, pal, 10);
+    av_quantize_freep(&qctx);
+    if (nb_colors < 0) {
+        av_free(argb_buf);
+        return nb_colors;
+    }
+
+    /* Reserve palette entry 255 for transparency */
+    if (has_transparency)
+        pal[255] = 0x00000000;
+
+    /* Convert RGBA bytes in-place to 0xAARRGGBB uint32_t for palette mapping */
+    for (int i = 0; i < nb_pixels; i++) {
+        uint8_t *p = (uint8_t *)(argb_buf + i);
+        uint8_t r = p[0], g = p[1], b = p[2], a = p[3];
+        argb_buf[i] = ((uint32_t)a << 24) | ((uint32_t)r << 16) |
+                      ((uint32_t)g << 8) | b;
+    }
+
+    /* Map pixels to palette indices with dithering */
+    map_ctx = ff_palette_map_init(pal, 128);
+    if (!map_ctx) {
+        av_free(argb_buf);
+        return AVERROR(ENOMEM);
+    }
+
+    ret = ff_palette_map_apply(map_ctx,
+                                pal8->data[0], pal8->linesize[0],
+                                argb_buf, w * sizeof(uint32_t),
+                                0, 0, w, h, s->dither, 0);
+
+    /* Store the mapper's internal palette — it sorts entries during init,
+     * so the indices returned by ff_palette_map_apply correspond to the
+     * sorted order, not the original av_quantize_generate_palette order. */
+    memcpy(pal8->data[1], ff_palette_map_get_palette(map_ctx), AVPALETTE_SIZE);
+
+    ff_palette_map_uninit(&map_ctx);
+    av_free(argb_buf);
+    if (ret < 0)
+        return ret;
+
+    /* Set transparent index so the existing GCE logic picks it up */
+    if (has_transparency)
+        s->transparent_index = 255;
+    else
+        s->transparent_index = -1;
+
+    return 0;
+}
+
 static av_cold int gif_encode_init(AVCodecContext *avctx)
 {
     GIFContext *s = avctx->priv_data;
@@ -465,6 +573,16 @@ static av_cold int gif_encode_init(AVCodecContext *avctx)
     s->tmpl = av_malloc(avctx->width);
     if (!s->tmpl || !s->buf || !s->lzw)
         return AVERROR(ENOMEM);
+
+    if (avctx->pix_fmt == AV_PIX_FMT_RGBA) {
+        s->rgba_pal8 = av_frame_alloc();
+        if (!s->rgba_pal8)
+            return AVERROR(ENOMEM);
+        s->rgba_pal8->format = AV_PIX_FMT_PAL8;
+        s->rgba_pal8->width  = avctx->width;
+        s->rgba_pal8->height = avctx->height;
+        return av_frame_get_buffer(s->rgba_pal8, 0);
+    }
 
     if (avpriv_set_systematic_pal2(s->palette, avctx->pix_fmt) < 0)
         av_assert0(avctx->pix_fmt == AV_PIX_FMT_PAL8);
@@ -485,20 +603,40 @@ static int gif_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     outbuf_ptr = pkt->data;
     end        = pkt->data + pkt->size;
 
-    if (avctx->pix_fmt == AV_PIX_FMT_PAL8) {
-        palette = (uint32_t*)pict->data[1];
+    if (avctx->pix_fmt == AV_PIX_FMT_RGBA) {
+        ret = gif_quantize_rgba(avctx, pict, s->rgba_pal8);
+        if (ret < 0)
+            return ret;
 
+        palette = (uint32_t *)s->rgba_pal8->data[1];
         if (!s->palette_loaded) {
             memcpy(s->palette, palette, AVPALETTE_SIZE);
-            s->transparent_index = get_palette_transparency_index(palette);
             s->palette_loaded = 1;
         } else if (!memcmp(s->palette, palette, AVPALETTE_SIZE)) {
             palette = NULL;
         }
-    }
 
-    gif_image_write_image(avctx, &outbuf_ptr, end, palette,
-                          pict->data[0], pict->linesize[0], pkt);
+        gif_image_write_image(avctx, &outbuf_ptr, end, palette,
+                              s->rgba_pal8->data[0],
+                              s->rgba_pal8->linesize[0], pkt);
+    } else {
+        if (avctx->pix_fmt == AV_PIX_FMT_PAL8) {
+            palette = (uint32_t*)pict->data[1];
+
+            if (!s->palette_loaded) {
+                memcpy(s->palette, palette, AVPALETTE_SIZE);
+                s->transparent_index = get_palette_transparency_index(palette);
+                s->palette_loaded = 1;
+                if (s->use_global_palette)
+                    palette = NULL;
+            } else if (!memcmp(s->palette, palette, AVPALETTE_SIZE)) {
+                palette = NULL;
+            }
+        }
+
+        gif_image_write_image(avctx, &outbuf_ptr, end, palette,
+                              pict->data[0], pict->linesize[0], pkt);
+    }
     if (!s->last_frame && !s->image) {
         s->last_frame = av_frame_alloc();
         if (!s->last_frame)
@@ -506,7 +644,9 @@ static int gif_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     }
 
     if (!s->image) {
-        ret = av_frame_replace(s->last_frame, pict);
+        const AVFrame *store = (avctx->pix_fmt == AV_PIX_FMT_RGBA)
+                             ? s->rgba_pal8 : pict;
+        ret = av_frame_replace(s->last_frame, store);
         if (ret < 0)
             return ret;
     }
@@ -528,6 +668,7 @@ static int gif_encode_close(AVCodecContext *avctx)
     av_freep(&s->shrunk_buf);
     s->buf_size = 0;
     av_frame_free(&s->last_frame);
+    av_frame_free(&s->rgba_pal8);
     av_freep(&s->tmpl);
     return 0;
 }
@@ -540,6 +681,31 @@ static const AVOption gif_options[] = {
         { "transdiff", "enable transparency detection between frames", 0, AV_OPT_TYPE_CONST, {.i64=GF_TRANSDIFF}, INT_MIN, INT_MAX, FLAGS, .unit = "flags" },
     { "gifimage", "enable encoding only images per frame", OFFSET(image), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, FLAGS },
     { "global_palette", "write a palette to the global gif header where feasible", OFFSET(use_global_palette), AV_OPT_TYPE_BOOL, {.i64=1}, 0, 1, FLAGS },
+    { "quantize_method", "color quantization algorithm for RGBA input",
+      OFFSET(quantize_method), AV_OPT_TYPE_INT,
+      {.i64 = AV_QUANTIZE_MEDIAN_CUT}, 0,
+      AV_QUANTIZE_NEUQUANT, FLAGS, .unit = "quantize_method" },
+        { "elbg",      "Enhanced LBG (Patane, Russo 2001)",
+          0, AV_OPT_TYPE_CONST, {.i64 = AV_QUANTIZE_ELBG},
+          0, 0, FLAGS, .unit = "quantize_method" },
+        { "mediancut", "Median Cut (Heckbert 1982)",
+          0, AV_OPT_TYPE_CONST, {.i64 = AV_QUANTIZE_MEDIAN_CUT},
+          0, 0, FLAGS, .unit = "quantize_method" },
+        { "neuquant",  "NeuQuant neural-net (Dekker 1994)",
+          0, AV_OPT_TYPE_CONST, {.i64 = AV_QUANTIZE_NEUQUANT},
+          0, 0, FLAGS, .unit = "quantize_method" },
+    { "dither", "dithering algorithm for RGBA input",
+      OFFSET(dither), AV_OPT_TYPE_INT,
+      {.i64 = FF_DITHERING_FLOYD_STEINBERG}, 0, FF_NB_DITHERING - 1, FLAGS, .unit = "dither" },
+        { "none",            "no dithering",           0, AV_OPT_TYPE_CONST, {.i64 = FF_DITHERING_NONE},            0, 0, FLAGS, .unit = "dither" },
+        { "bayer",           "ordered Bayer matrix",   0, AV_OPT_TYPE_CONST, {.i64 = FF_DITHERING_BAYER},           0, 0, FLAGS, .unit = "dither" },
+        { "heckbert",        "Heckbert diffusion",     0, AV_OPT_TYPE_CONST, {.i64 = FF_DITHERING_HECKBERT},        0, 0, FLAGS, .unit = "dither" },
+        { "floyd_steinberg", "Floyd-Steinberg (default)", 0, AV_OPT_TYPE_CONST, {.i64 = FF_DITHERING_FLOYD_STEINBERG}, 0, 0, FLAGS, .unit = "dither" },
+        { "sierra2",         "Sierra-2",               0, AV_OPT_TYPE_CONST, {.i64 = FF_DITHERING_SIERRA2},         0, 0, FLAGS, .unit = "dither" },
+        { "sierra2_4a",      "Sierra-2-4A",            0, AV_OPT_TYPE_CONST, {.i64 = FF_DITHERING_SIERRA2_4A},      0, 0, FLAGS, .unit = "dither" },
+        { "sierra3",         "Sierra-3",               0, AV_OPT_TYPE_CONST, {.i64 = FF_DITHERING_SIERRA3},         0, 0, FLAGS, .unit = "dither" },
+        { "burkes",          "Burkes diffusion",       0, AV_OPT_TYPE_CONST, {.i64 = FF_DITHERING_BURKES},          0, 0, FLAGS, .unit = "dither" },
+        { "atkinson",        "Atkinson diffusion",     0, AV_OPT_TYPE_CONST, {.i64 = FF_DITHERING_ATKINSON},        0, 0, FLAGS, .unit = "dither" },
     { NULL }
 };
 
@@ -561,7 +727,8 @@ const FFCodec ff_gif_encoder = {
     FF_CODEC_ENCODE_CB(gif_encode_frame),
     .close          = gif_encode_close,
     CODEC_PIXFMTS(AV_PIX_FMT_RGB8, AV_PIX_FMT_BGR8, AV_PIX_FMT_RGB4_BYTE,
-                  AV_PIX_FMT_BGR4_BYTE, AV_PIX_FMT_GRAY8, AV_PIX_FMT_PAL8),
+                  AV_PIX_FMT_BGR4_BYTE, AV_PIX_FMT_GRAY8, AV_PIX_FMT_PAL8,
+                  AV_PIX_FMT_RGBA),
     .p.priv_class   = &gif_class,
     .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
 };
