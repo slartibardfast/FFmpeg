@@ -134,6 +134,7 @@ OBJS = adler32.o                                                        \
        display.o                                                        \
        dovi_meta.o                                                      \
        downmix_info.o                                                   \
+       elbg.o                                                           \
        encryption_info.o                                                \
        error.o                                                          \
        eval.o                                                           \
@@ -163,6 +164,7 @@ OBJS = adler32.o                                                        \
        mathematics.o                                                    \
        mastering_display_metadata.o                                     \
        md5.o                                                            \
+       mediancut.o                                                      \
        mem.o                                                            \
        murmur3.o                                                        \
        neuquant.o                                                       \
