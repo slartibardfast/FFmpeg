@@ -44,8 +44,8 @@
 
 #include "avcodec.h"
 #include "codec_internal.h"
-#include "elbg.h"
 #include "encode.h"
+#include "libavutil/elbg.h"
 
 #define CVID_HEADER_SIZE 10
 #define STRIP_HEADER_SIZE 12
