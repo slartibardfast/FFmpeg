@@ -49,7 +49,8 @@
  */
 
 enum AVQuantizeAlgorithm {
-    AV_QUANTIZE_NEUQUANT,   /**< NeuQuant neural-net quantizer */
+    AV_QUANTIZE_NEUQUANT,    /**< NeuQuant neural-net quantizer */
+    AV_QUANTIZE_MEDIAN_CUT,  /**< Median Cut (Heckbert 1982) */
 };
 
 typedef struct AVQuantizeContext AVQuantizeContext;
