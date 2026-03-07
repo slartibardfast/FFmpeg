@@ -163,6 +163,7 @@ OBJS = adler32.o                                                        \
        mathematics.o                                                    \
        mastering_display_metadata.o                                     \
        md5.o                                                            \
+       mediancut.o                                                      \
        mem.o                                                            \
        murmur3.o                                                        \
        neuquant.o                                                       \
