@@ -237,8 +237,10 @@ static void reset_state(MedianCutContext *ctx)
     av_freep(&ctx->refs);
     ctx->nb_refs = 0;
     ctx->nb_boxes = 0;
+    ctx->trained = 0;
     memset(ctx->histogram, 0, sizeof(ctx->histogram));
     memset(ctx->boxes, 0, sizeof(ctx->boxes));
+    memset(ctx->palette, 0, sizeof(ctx->palette));
 }
 
 MedianCutContext *ff_mediancut_alloc(int max_colors)
@@ -265,45 +267,38 @@ void ff_mediancut_free(MedianCutContext **pctx)
     }
 }
 
-int ff_mediancut_learn(MedianCutContext *ctx, const uint8_t *rgba,
-                       int nb_pixels)
+int ff_mediancut_add_color(MedianCutContext *ctx, uint32_t color)
+{
+    int ret;
+
+    if (!ctx)
+        return AVERROR(EINVAL);
+
+    ret = color_inc(ctx->histogram, color);
+    if (ret > 0)
+        ctx->nb_refs++;
+    return ret;
+}
+
+int ff_mediancut_build_palette(MedianCutContext *ctx)
 {
     int box_id;
     struct range_box *box;
 
-    if (!ctx || !rgba || nb_pixels < 1)
+    if (!ctx || ctx->nb_refs < 1)
         return AVERROR(EINVAL);
 
-    reset_state(ctx);
     ctx->trained = 0;
 
-    /* Build color histogram from RGBA input */
-    for (int i = 0; i < nb_pixels; i++) {
-        const uint8_t *p = rgba + (size_t)i * 4;
-        uint32_t color = ((uint32_t)p[3] << 24) |
-                         ((uint32_t)p[0] << 16) |
-                         ((uint32_t)p[1] <<  8) |
-                          (uint32_t)p[2];
-        int ret = color_inc(ctx->histogram, color);
-        if (ret < 0) {
-            reset_state(ctx);
-            return ret;
-        }
-        if (ret > 0)
-            ctx->nb_refs++;
-    }
-
-    if (ctx->nb_refs < 1) {
-        reset_state(ctx);
-        return AVERROR(EINVAL);
-    }
+    /* Free any previous refs/boxes from a prior build */
+    av_freep(&ctx->refs);
+    ctx->nb_boxes = 0;
+    memset(ctx->boxes, 0, sizeof(ctx->boxes));
 
     /* Linearize histogram into sorted color reference array */
     ctx->refs = load_color_refs(ctx->histogram, ctx->nb_refs);
-    if (!ctx->refs) {
-        reset_state(ctx);
+    if (!ctx->refs)
         return AVERROR(ENOMEM);
-    }
 
     /* Initialize first box spanning all colors */
     box = &ctx->boxes[0];
@@ -352,7 +347,37 @@ int ff_mediancut_learn(MedianCutContext *ctx, const uint8_t *rgba,
         ctx->palette[i] = ctx->boxes[i].color;
 
     ctx->trained = 1;
-    return 0;
+    return ctx->nb_boxes;
+}
+
+int ff_mediancut_learn(MedianCutContext *ctx, const uint8_t *rgba,
+                       int nb_pixels)
+{
+    int ret;
+
+    if (!ctx || !rgba || nb_pixels < 1)
+        return AVERROR(EINVAL);
+
+    ff_mediancut_reset(ctx);
+
+    /* Build color histogram from RGBA input */
+    for (int i = 0; i < nb_pixels; i++) {
+        const uint8_t *p = rgba + (size_t)i * 4;
+        uint32_t color = ((uint32_t)p[3] << 24) |
+                         ((uint32_t)p[0] << 16) |
+                         ((uint32_t)p[1] <<  8) |
+                          (uint32_t)p[2];
+        ret = ff_mediancut_add_color(ctx, color);
+        if (ret < 0) {
+            ff_mediancut_reset(ctx);
+            return ret;
+        }
+    }
+
+    ret = ff_mediancut_build_palette(ctx);
+    if (ret < 0)
+        ff_mediancut_reset(ctx);
+    return ret;
 }
 
 void ff_mediancut_get_palette(const MedianCutContext *ctx, uint32_t *palette)
@@ -385,4 +410,15 @@ int ff_mediancut_map_pixel(const MedianCutContext *ctx,
 int ff_mediancut_is_trained(const MedianCutContext *ctx)
 {
     return ctx && ctx->trained;
+}
+
+int ff_mediancut_nb_colors(const MedianCutContext *ctx)
+{
+    return ctx ? ctx->nb_refs : 0;
+}
+
+void ff_mediancut_reset(MedianCutContext *ctx)
+{
+    if (ctx)
+        reset_state(ctx);
 }
