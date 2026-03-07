@@ -30,7 +30,7 @@
 #include "bytestream.h"
 #include "libavutil/lfg.h"
 #include "libavutil/mem.h"
-#include "elbg.h"
+#include "libavutil/elbg.h"
 #include "libavutil/imgutils.h"
 /**
  * Encoder context
