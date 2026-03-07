@@ -1365,6 +1365,35 @@ static int flush_coalesced_subtitles(OutputFile *of, OutputStream *ost,
             goto cleanup;
         }
 
+        /* Region-weighted quantization: render each event separately
+         * so NeuQuant samples equally from each, preventing large
+         * events from starving small events of palette entries.
+         * The composite RGBA (rendered above) is used for apply(). */
+        if (ep->sub_coalesce.nb > 1) {
+            for (i = 0; i < ep->sub_coalesce.nb; i++) {
+                uint8_t *ev_rgba = NULL;
+                int ev_ls, ev_x, ev_y, ev_w, ev_h, nb_ev_pixels;
+
+                ret = avfilter_subtitle_render_frame(ep->sub_render,
+                          ep->sub_coalesce.texts[i], start_ms,
+                          ep->sub_coalesce.durations[i],
+                          &ev_rgba, &ev_ls, &ev_x, &ev_y, &ev_w, &ev_h);
+                if (ret < 0 || !ev_rgba) {
+                    av_free(ev_rgba);
+                    continue;
+                }
+
+                nb_ev_pixels = (int)FFMIN((int64_t)ev_w * ev_h, INT_MAX);
+                ret = av_quantize_add_region(qctx, ev_rgba, nb_ev_pixels);
+                av_free(ev_rgba);
+                if (ret < 0) {
+                    av_quantize_freep(&qctx);
+                    av_free(rgba);
+                    goto cleanup;
+                }
+            }
+        }
+
         nc = av_quantize_generate_palette(qctx, rgba, nb_pixels, pal, 10);
         if (nc < 0) {
             av_quantize_freep(&qctx);
