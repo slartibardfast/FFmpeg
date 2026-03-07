@@ -2,6 +2,9 @@ The last version increases of all libraries were on 2025-03-28
 
 API changes, most recent first:
 
+2026-03-xx - xxxxxxxxxx - lavu 60.27.100 - quantize.h
+  Add av_quantize_add_region().
+
 2026-03-xx - xxxxxxxxxx - lavfi 11.13.100 - subtitle_render.h
   Add text subtitle rendering API:
     - Add avfilter_subtitle_render_alloc().
