@@ -940,6 +940,86 @@ static int test_mediancut_vs_neuquant(void)
     return 0;
 }
 
+/* Test ELBG basic quantization with 4 color clusters. */
+static int test_elbg_basic(void)
+{
+    AVQuantizeContext *ctx;
+    uint32_t palette[16];
+    uint8_t indices[256];
+    uint8_t rgba[256 * 4];
+    int nc;
+
+    printf("test_elbg_basic: ");
+
+    /* 4 clusters: red, green, blue, white (64 pixels each) */
+    for (int i = 0; i < 64; i++) {
+        uint8_t *p = rgba + i * 4;
+        p[0] = 255; p[1] = 0; p[2] = 0; p[3] = 255;
+    }
+    for (int i = 64; i < 128; i++) {
+        uint8_t *p = rgba + i * 4;
+        p[0] = 0; p[1] = 255; p[2] = 0; p[3] = 255;
+    }
+    for (int i = 128; i < 192; i++) {
+        uint8_t *p = rgba + i * 4;
+        p[0] = 0; p[1] = 0; p[2] = 255; p[3] = 255;
+    }
+    for (int i = 192; i < 256; i++) {
+        uint8_t *p = rgba + i * 4;
+        p[0] = 255; p[1] = 255; p[2] = 255; p[3] = 255;
+    }
+
+    ctx = av_quantize_alloc(AV_QUANTIZE_ELBG, 16);
+    if (!ctx) return -1;
+
+    nc = av_quantize_generate_palette(ctx, rgba, 256, palette, 10);
+    if (nc < 0) {
+        fprintf(stderr, "generate_palette failed: %d\n", nc);
+        av_quantize_freep(&ctx);
+        return -1;
+    }
+
+    if (av_quantize_apply(ctx, rgba, indices, 256) < 0) {
+        fprintf(stderr, "apply failed\n");
+        av_quantize_freep(&ctx);
+        return -1;
+    }
+
+    /* Verify all indices are in range */
+    for (int i = 0; i < 256; i++) {
+        if (indices[i] >= 16) {
+            fprintf(stderr, "index %d out of range at pixel %d\n",
+                    indices[i], i);
+            av_quantize_freep(&ctx);
+            return -1;
+        }
+    }
+
+    /* Check palette has entries near the 4 clusters */
+    {
+        int found_r = 0, found_g = 0, found_b = 0, found_w = 0;
+        for (int i = 0; i < nc; i++) {
+            uint8_t r = (palette[i] >> 16) & 0xff;
+            uint8_t g = (palette[i] >>  8) & 0xff;
+            uint8_t b =  palette[i]        & 0xff;
+            if (r > 200 && g < 50 && b < 50) found_r = 1;
+            if (r < 50 && g > 200 && b < 50) found_g = 1;
+            if (r < 50 && g < 50 && b > 200) found_b = 1;
+            if (r > 200 && g > 200 && b > 200) found_w = 1;
+        }
+        if (!found_r || !found_g || !found_b || !found_w) {
+            fprintf(stderr, "missing cluster: R=%d G=%d B=%d W=%d\n",
+                    found_r, found_g, found_b, found_w);
+            av_quantize_freep(&ctx);
+            return -1;
+        }
+    }
+
+    av_quantize_freep(&ctx);
+    printf("OK\n");
+    return 0;
+}
+
 int main(void)
 {
     int ret = 0;
@@ -956,6 +1036,7 @@ int main(void)
     ret |= test_mediancut_basic();
     ret |= test_mediancut_regions();
     ret |= test_mediancut_vs_neuquant();
+    ret |= test_elbg_basic();
 
     return !!ret;
 }
