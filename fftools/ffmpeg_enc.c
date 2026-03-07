@@ -40,6 +40,7 @@
 
 #include "libavfilter/subtitle_render.h"
 
+#include "libavutil/opt.h"
 #include "libavutil/quantize.h"
 
 #include "ffmpeg_subtitle_animation.c"
@@ -439,11 +440,25 @@ static int fill_rect_bitmap(AVSubtitleRect *rect,
 }
 
 /**
+ * Read the quantize_method option from the encoder's private data.
+ * Falls back to AV_QUANTIZE_NEUQUANT if the option does not exist.
+ */
+static enum AVQuantizeAlgorithm get_quantize_algo(const AVCodecContext *enc_ctx)
+{
+    int64_t val;
+    if (enc_ctx->priv_data &&
+        av_opt_get_int(enc_ctx->priv_data, "quantize_method", 0, &val) >= 0)
+        return val;
+    return AV_QUANTIZE_NEUQUANT;
+}
+
+/**
  * Quantize an RGBA region and fill an AVSubtitleRect as SUBTITLE_BITMAP.
  */
 static int quantize_rgba_to_rect(AVSubtitleRect *rect,
                                  const uint8_t *rgba,
-                                 int rx, int ry, int rw, int rh)
+                                 int rx, int ry, int rw, int rh,
+                                 enum AVQuantizeAlgorithm algo)
 {
     AVQuantizeContext *qctx;
     uint32_t palette[256] = {0};
@@ -451,7 +466,7 @@ static int quantize_rgba_to_rect(AVSubtitleRect *rect,
     int nb_pixels = (int)FFMIN((int64_t)rw * rh, INT_MAX);
     int nb_colors, ret;
 
-    qctx = av_quantize_alloc(AV_QUANTIZE_NEUQUANT, 256);
+    qctx = av_quantize_alloc(algo, 256);
     if (!qctx)
         return AVERROR(ENOMEM);
 
@@ -552,6 +567,7 @@ static int convert_text_to_bitmap(EncoderPriv *ep, OutputStream *ost,
 {
     AVCodecContext *enc_ctx = ep->e.enc_ctx;
     const AVCodecDescriptor *enc_desc;
+    enum AVQuantizeAlgorithm algo = get_quantize_algo(enc_ctx);
     int need_convert = 0;
     unsigned i;
     int ret;
@@ -611,10 +627,10 @@ static int convert_text_to_bitmap(EncoderPriv *ep, OutputStream *ost,
             AVQuantizeContext *qctx;
             uint32_t pal[256] = {0};
             uint8_t *indices;
-            int nb_pixels = rw * rh;
+            int nb_pixels = (int)FFMIN((int64_t)rw * rh, INT_MAX);
             int nc;
 
-            qctx = av_quantize_alloc(AV_QUANTIZE_NEUQUANT, 256);
+            qctx = av_quantize_alloc(algo, 256);
             if (!qctx) {
                 av_free(rgba);
                 return AVERROR(ENOMEM);
@@ -785,6 +801,7 @@ static int do_subtitle_out_animated(OutputFile *of, OutputStream *ost,
     uint32_t ref_palette[256];
     uint32_t scaled_pal[256];
     int nb_colors;
+    enum AVQuantizeAlgorithm algo = get_quantize_algo(enc);
 
     start_ms    = sub->start_display_time;
     duration_ms = sub->end_display_time - sub->start_display_time;
@@ -877,7 +894,7 @@ static int do_subtitle_out_animated(OutputFile *of, OutputStream *ost,
     if (worst_change == SUB_CHANGE_NONE) {
         /* Static subtitle -- quantize first frame, single encode */
         memset(&local_rect, 0, sizeof(local_rect));
-        ret = quantize_rgba_to_rect(&local_rect, rgba0, x0, y0, w0, h0);
+        ret = quantize_rgba_to_rect(&local_rect, rgba0, x0, y0, w0, h0, algo);
         av_freep(&rgba0);
         if (ret < 0)
             goto fail;
@@ -926,7 +943,8 @@ static int do_subtitle_out_animated(OutputFile *of, OutputStream *ost,
         }
 
         memset(&local_rect, 0, sizeof(local_rect));
-        ret = quantize_rgba_to_rect(&local_rect, peak_rgba, px, py, pw, ph);
+        ret = quantize_rgba_to_rect(&local_rect, peak_rgba,
+                                    px, py, pw, ph, algo);
         av_free(peak_rgba);
         if (ret < 0)
             goto fail;
@@ -1049,7 +1067,8 @@ done_rect:
         }
 
         memset(&local_rect, 0, sizeof(local_rect));
-        ret = quantize_rgba_to_rect(&local_rect, first_rgba, fx, fy, fw, fh);
+        ret = quantize_rgba_to_rect(&local_rect, first_rgba,
+                                    fx, fy, fw, fh, algo);
         av_free(first_rgba);
         if (ret < 0)
             goto fail;
@@ -1119,7 +1138,8 @@ done_pos:
         }
 
         memset(&local_rect, 0, sizeof(local_rect));
-        ret = quantize_rgba_to_rect(&local_rect, first_rgba, fx, fy, fw, fh);
+        ret = quantize_rgba_to_rect(&local_rect, first_rgba,
+                                    fx, fy, fw, fh, algo);
         av_free(first_rgba);
         if (ret < 0)
             goto fail;
@@ -1162,7 +1182,8 @@ done_pos:
             av_freep(&local_rect.data[0]);
             av_freep(&local_rect.data[1]);
             memset(&local_rect, 0, sizeof(local_rect));
-            ret = quantize_rgba_to_rect(&local_rect, rgba, sx, sy, sw, sh);
+            ret = quantize_rgba_to_rect(&local_rect, rgba,
+                                        sx, sy, sw, sh, algo);
             av_free(rgba);
             if (ret < 0)
                 goto fail;
@@ -1278,6 +1299,7 @@ static int flush_coalesced_subtitles(OutputFile *of, OutputStream *ost,
     AVSubtitleRect comp_rect  = {0};
     AVSubtitleRect comp_rect2 = {0};
     AVSubtitleRect *comp_rects[2] = { &comp_rect, &comp_rect2 };
+    enum AVQuantizeAlgorithm algo = get_quantize_algo(enc);
 
     if (ep->sub_coalesce.nb == 0)
         return 0;
@@ -1355,10 +1377,10 @@ static int flush_coalesced_subtitles(OutputFile *of, OutputStream *ost,
         AVQuantizeContext *qctx;
         uint32_t pal[256] = {0};
         uint8_t *indices;
-        int nb_pixels = rw * rh;
+        int nb_pixels = (int)FFMIN((int64_t)rw * rh, INT_MAX);
         int nc;
 
-        qctx = av_quantize_alloc(AV_QUANTIZE_NEUQUANT, 256);
+        qctx = av_quantize_alloc(algo, 256);
         if (!qctx) {
             av_free(rgba);
             ret = AVERROR(ENOMEM);
