@@ -34,11 +34,45 @@ typedef struct MedianCutContext MedianCutContext;
 
 MedianCutContext *ff_mediancut_alloc(int max_colors);
 void ff_mediancut_free(MedianCutContext **ctx);
+
+/**
+ * Increment the histogram count for a single color.
+ *
+ * @param color 0xAARRGGBB packed color
+ * @return 1 if the color is new, 0 if it already existed, negative on error
+ */
+int ff_mediancut_add_color(MedianCutContext *ctx, uint32_t color);
+
+/**
+ * Run Median Cut on the accumulated histogram and generate the palette.
+ *
+ * Colors must have been added beforehand via ff_mediancut_add_color()
+ * or ff_mediancut_learn().
+ *
+ * @return number of palette entries (>0) on success, negative on error
+ */
+int ff_mediancut_build_palette(MedianCutContext *ctx);
+
+/**
+ * Convenience wrapper: reset state, build histogram from RGBA pixels,
+ * and generate the palette in one call.
+ */
 int ff_mediancut_learn(MedianCutContext *ctx, const uint8_t *rgba,
                        int nb_pixels);
+
 void ff_mediancut_get_palette(const MedianCutContext *ctx, uint32_t *palette);
 int ff_mediancut_map_pixel(const MedianCutContext *ctx,
                            uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 int ff_mediancut_is_trained(const MedianCutContext *ctx);
+
+/**
+ * Return the number of distinct colors in the histogram.
+ */
+int ff_mediancut_nb_colors(const MedianCutContext *ctx);
+
+/**
+ * Reset all state (histogram, palette, trained flag) for reuse.
+ */
+void ff_mediancut_reset(MedianCutContext *ctx);
 
 #endif /* AVUTIL_MEDIANCUT_H */
