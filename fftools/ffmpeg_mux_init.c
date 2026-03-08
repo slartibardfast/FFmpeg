@@ -32,6 +32,7 @@
 #include "libavcodec/avcodec.h"
 
 #include "libavfilter/avfilter.h"
+#include "libavfilter/subtitle_ocr.h"
 #include "libavfilter/subtitle_render.h"
 
 #include "libavutil/avassert.h"
@@ -897,6 +898,17 @@ static int new_stream_subtitle(Muxer *mux, const OptionsContext *o,
                     return AVERROR(ENOSYS);
                 }
                 avfilter_subtitle_render_freep(&test);
+            } else if ((input_props & AV_CODEC_PROP_BITMAP_SUB) &&
+                       (output_props & AV_CODEC_PROP_TEXT_SUB)) {
+                /* Bitmap-to-text conversion handled by OCR */
+                AVSubtitleOCRContext *test = avfilter_subtitle_ocr_alloc();
+                if (!test) {
+                    av_log(ost, AV_LOG_ERROR,
+                           "Bitmap to text subtitle conversion requires "
+                           "libtesseract (--enable-libtesseract)\n");
+                    return AVERROR(ENOSYS);
+                }
+                avfilter_subtitle_ocr_freep(&test);
             } else {
                 av_log(ost, AV_LOG_ERROR,
                        "Subtitle encoding currently only possible from "
@@ -1532,6 +1544,22 @@ static int ost_add(Muxer *mux, const OptionsContext *o, enum AVMediaType type,
 
     opt_match_per_stream_int(ost, &o->fix_sub_duration_heartbeat,
                              oc, st, &ost->fix_sub_duration_heartbeat);
+
+    {
+        const char *tmp;
+        tmp = NULL;
+        opt_match_per_stream_str(ost, &o->sub_ocr_lang, oc, st, &tmp);
+        if (tmp)
+            ost->sub_ocr_lang = av_strdup(tmp);
+        tmp = NULL;
+        opt_match_per_stream_str(ost, &o->sub_ocr_datapath, oc, st, &tmp);
+        if (tmp)
+            ost->sub_ocr_datapath = av_strdup(tmp);
+    }
+    opt_match_per_stream_int(ost, &o->sub_ocr_pageseg_mode, oc, st,
+                             &ost->sub_ocr_pageseg_mode);
+    opt_match_per_stream_int(ost, &o->sub_ocr_min_duration, oc, st,
+                             &ost->sub_ocr_min_duration);
 
     if (oc->oformat->flags & AVFMT_GLOBALHEADER && ost->enc)
         ost->enc->enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
