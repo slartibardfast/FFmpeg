@@ -11,6 +11,14 @@ API changes, most recent first:
 2026-03-xx - xxxxxxxxxx - lavu 60.10.100 - quantize.h
   Add av_quantize_add_region().
 
+2026-03-xx - xxxxxxxxxx - lavfi 11.6.100 - subtitle_ocr.h
+  Add bitmap subtitle OCR API:
+    - Add avfilter_subtitle_ocr_alloc().
+    - Add avfilter_subtitle_ocr_freep().
+    - Add avfilter_subtitle_ocr_init().
+    - Add avfilter_subtitle_ocr_recognize().
+    - Add avfilter_subtitle_ocr_set_pageseg_mode().
+
 2026-03-xx - xxxxxxxxxx - lavfi 11.5.100 - subtitle_render.h
   Add text subtitle rendering API:
     - Add avfilter_subtitle_render_alloc().
