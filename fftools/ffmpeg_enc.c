@@ -36,9 +36,13 @@
 #include "libavutil/time.h"
 #include "libavutil/timestamp.h"
 
+#include "libavcodec/ass.h"
 #include "libavcodec/avcodec.h"
 
+#include "libavfilter/subtitle_ocr.h"
 #include "libavfilter/subtitle_render.h"
+
+#include "libavformat/avlanguage.h"
 
 #include "libavutil/opt.h"
 #include "libavutil/quantize.h"
@@ -77,6 +81,26 @@ typedef struct EncoderPriv {
         uint32_t  start_display_time;
         uint32_t  end_display_time;
     } sub_coalesce;
+
+    AVSubtitleOCRContext *sub_ocr;
+
+    /* Deduplication state for bitmap-to-text OCR conversion.
+     * Consecutive bitmap events with identical pixel data are merged
+     * into a single text event, avoiding redundant OCR calls for
+     * palette-only changes (e.g. PGS fade sequences). */
+    struct {
+        uint8_t  *prev_bitmap;
+        int       prev_bitmap_size;
+        int       prev_w, prev_h;
+        int       prev_x, prev_y;
+        char     *prev_text;
+        int64_t   run_pts;
+        uint32_t  run_start;
+        uint32_t  run_end;
+        int       first_x, first_y;
+        int       last_x, last_y;
+        int       position_changed;
+    } sub_ocr_dedup;
 } EncoderPriv;
 
 static EncoderPriv *ep_from_enc(Encoder *enc)
@@ -104,6 +128,9 @@ void enc_free(Encoder **penc)
     av_freep(&ep->sub_coalesce.texts);
     av_freep(&ep->sub_coalesce.durations);
     avfilter_subtitle_render_freep(&ep->sub_render);
+    av_freep(&ep->sub_ocr_dedup.prev_bitmap);
+    av_freep(&ep->sub_ocr_dedup.prev_text);
+    avfilter_subtitle_ocr_freep(&ep->sub_ocr);
 
     if (enc->enc_ctx)
         av_freep(&enc->enc_ctx->stats_in);
@@ -348,6 +375,33 @@ int enc_open(void *opaque, const AVFrame *frame)
             memcpy(enc_ctx->subtitle_header, dec->subtitle_header,
                    dec->subtitle_header_size);
             enc_ctx->subtitle_header_size = dec->subtitle_header_size;
+        } else {
+            const AVCodecDescriptor *in_desc, *out_desc;
+            in_desc  = avcodec_descriptor_get(ost->ist->par->codec_id);
+            out_desc = avcodec_descriptor_get(enc_ctx->codec_id);
+            /* Bitmap-to-text: provide an ASS header with PlayRes
+             * matching the source video dimensions so that \pos()
+             * coordinates from the bitmap rects are meaningful. */
+            if (in_desc && out_desc &&
+                (in_desc->props & AV_CODEC_PROP_BITMAP_SUB) &&
+                (out_desc->props & AV_CODEC_PROP_TEXT_SUB)) {
+                int play_res_x = ost->ist->par->width;
+                int play_res_y = ost->ist->par->height;
+                if (play_res_x <= 0) play_res_x = enc_ctx->width;
+                if (play_res_y <= 0) play_res_y = enc_ctx->height;
+                if (play_res_x <= 0) play_res_x = 1920;
+                if (play_res_y <= 0) play_res_y = 1080;
+                ret = ff_ass_subtitle_header_full(enc_ctx,
+                    play_res_x, play_res_y,
+                    ASS_DEFAULT_FONT, ASS_DEFAULT_FONT_SIZE,
+                    ASS_DEFAULT_COLOR, ASS_DEFAULT_COLOR,
+                    ASS_DEFAULT_BACK_COLOR, ASS_DEFAULT_BACK_COLOR,
+                    ASS_DEFAULT_BOLD, ASS_DEFAULT_ITALIC,
+                    ASS_DEFAULT_UNDERLINE,
+                    ASS_DEFAULT_BORDERSTYLE, ASS_DEFAULT_ALIGNMENT);
+                if (ret < 0)
+                    return ret;
+            }
         }
 
         break;
@@ -435,6 +489,589 @@ static int fill_rect_bitmap(AVSubtitleRect *rect,
         return AVERROR(ENOMEM);
     }
     rect->linesize[1] = nb_colors * 4;
+
+    return 0;
+}
+
+/* Bitmap-to-text OCR conversion constants */
+#define SUB_OCR_MIN_DURATION_MS 200
+#define GRAYSCALE_PAD           16
+
+/* Forward declaration -- defined after animation code */
+static int encode_subtitle_packet(EncoderPriv *ep, AVCodecContext *enc,
+                                   AVSubtitle *sub, int64_t pts,
+                                   AVPacket *pkt);
+
+/**
+ * Convert an indexed-color bitmap subtitle rect to grayscale.
+ *
+ * Two strategies based on palette complexity:
+ *
+ * - For blocky sources (nb_colors <= 8, e.g. DVD 4-color), binary
+ *   text-body extraction identifies the most common opaque palette
+ *   entry as text and renders it black, everything else white.
+ *   The thick opaque outline in DVD subtitles confuses OCR when
+ *   rendered as grayscale; binary extraction isolates just the text.
+ *
+ * - For anti-aliased sources (nb_colors > 8, e.g. PGS 256-color),
+ *   luminance-alpha mapping preserves smooth edges.  Each pixel is
+ *   converted to luminance weighted by alpha, then inverted
+ *   so light opaque text becomes dark and transparent/dark pixels
+ *   become white.  This avoids identifying a "text body" color,
+ *   which fails when the outline has more pixels than the text fill.
+ *
+ * Returns an av_malloc'd grayscale buffer; caller frees with av_free().
+ */
+static uint8_t *bitmap_to_grayscale(const AVSubtitleRect *rect,
+                                     int *out_w, int *out_h)
+{
+    const uint8_t *pixels  = rect->data[0];
+    const uint32_t *palette = (const uint32_t *)rect->data[1];
+    int w = rect->w, h = rect->h;
+    int nb_colors = FFMIN(rect->nb_colors, 256);
+    int ow = w + 2 * GRAYSCALE_PAD;
+    int oh = h + 2 * GRAYSCALE_PAD;
+    uint8_t *gray;
+    int counts[256] = {0};
+    int text_idx = -1, text_count = 0;
+
+    if (w <= 0 || h <= 0)
+        return NULL;
+    if ((int64_t)ow * oh > INT_MAX)
+        return NULL;
+
+    /* Count pixels per palette entry to find the dominant opaque color.
+     * Used only for blocky sources (DVD) where binary extraction is
+     * needed; anti-aliased sources use luminance-alpha mapping instead. */
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+            counts[pixels[y * rect->linesize[0] + x]]++;
+
+    for (int i = 0; i < nb_colors; i++) {
+        uint8_t a = (palette[i] >> 24) & 0xFF;
+        if (a > 128 && counts[i] > text_count) {
+            text_count = counts[i];
+            text_idx = i;
+        }
+    }
+
+    /* Allocate with white padding around the bitmap.  Subtitle rects
+     * are tightly cropped; Tesseract needs margin for reliable text
+     * block detection and line segmentation. */
+    gray = av_malloc(ow * oh);
+    if (!gray)
+        return NULL;
+    memset(gray, 255, ow * oh);
+
+    if (nb_colors <= 8) {
+        /* Blocky sources (DVD 4-color): text-body extraction.
+         * The thick opaque outline in DVD subtitles confuses OCR
+         * when rendered as grayscale.  Binary extraction isolates
+         * just the text body for clean recognition. */
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                gray[(y + GRAYSCALE_PAD) * ow + x + GRAYSCALE_PAD] =
+                    (pixels[y * rect->linesize[0] + x] == text_idx)
+                        ? 0 : 255;
+    } else {
+        /* Anti-aliased sources (PGS 256-color): luminance-alpha mapping.
+         * Subtitle bitmaps have light text (white/yellow) with dark
+         * outline (black) on transparent background.  Convert each
+         * pixel to grayscale using luminance weighted by alpha,
+         * then invert so light opaque text becomes dark (black) and
+         * transparent/dark pixels become light (white).  This avoids
+         * the need to identify a "text body" color, which fails when
+         * the outline has more pixels than the text fill. */
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                int idx = pixels[y * rect->linesize[0] + x];
+                uint32_t c = palette[idx];
+                int r  = (c >> 16) & 0xFF;
+                int g  = (c >> 8)  & 0xFF;
+                int b  =  c        & 0xFF;
+                int a  = (c >> 24) & 0xFF;
+                int lum = (r * 77 + g * 150 + b * 29) >> 8;
+                gray[(y + GRAYSCALE_PAD) * ow + x + GRAYSCALE_PAD] =
+                    255 - (a * lum / 255);
+            }
+    }
+
+    *out_w = ow;
+    *out_h = oh;
+    return gray;
+}
+
+/**
+ * Compute ASS alignment tag (\anN) from bitmap position on canvas.
+ *
+ * Divides the canvas into a 3x3 grid (numpad layout):
+ *   7 8 9  (top)
+ *   4 5 6  (middle)
+ *   1 2 3  (bottom)
+ */
+static int compute_alignment(int rx, int ry, int rw, int rh,
+                              int canvas_w, int canvas_h)
+{
+    int cx = rx + rw / 2;
+    int cy = ry + rh / 2;
+    int col, row;
+
+    if (cx < canvas_w / 3)
+        col = 0; /* left */
+    else if (cx < canvas_w * 2 / 3)
+        col = 1; /* center */
+    else
+        col = 2; /* right */
+
+    if (cy < canvas_h / 3)
+        row = 2; /* top */
+    else if (cy < canvas_h * 2 / 3)
+        row = 1; /* middle */
+    else
+        row = 0; /* bottom */
+
+    /* \an numpad: bottom-left=1, bottom-center=2, bottom-right=3, etc. */
+    return row * 3 + col + 1;
+}
+
+/**
+ * Map an ISO 639 language code to a Tesseract language code.
+ *
+ * Tesseract uses its own codes for languages with multiple scripts
+ * (e.g. chi_tra, chi_sim) that have no ISO 639 equivalent.  This
+ * table maps from ISO 639-2/B and 639-2/T codes to Tesseract codes.
+ * For most languages the codes are identical; only exceptions are
+ * listed here.
+ *
+ * Returns the Tesseract code, or NULL if no special mapping exists
+ * (caller should use the ISO 639-2/T code directly).
+ */
+static const char *iso639_to_tesseract(const char *lang)
+{
+    static const struct {
+        const char *iso;
+        const char *tess;
+    } map[] = {
+        /* Chinese: ISO 639 has one code, Tesseract splits by script.
+         * Default to Traditional (common for Blu-ray/DVD subtitles).
+         * Users can override with -sub_ocr_lang chi_sim. */
+        { "chi",     "chi_tra" },   /* 639-2/B */
+        { "zho",     "chi_tra" },   /* 639-2/T */
+        /* Serbian: Tesseract has separate Cyrillic (srp) and Latin */
+        { "srp",     "srp" },       /* identity -- Cyrillic default */
+        /* Uzbek: Tesseract has separate Cyrillic variant */
+        { "uzb",     "uzb" },       /* identity -- Latin default */
+    };
+
+    for (int i = 0; i < FF_ARRAY_ELEMS(map); i++) {
+        if (!strcmp(lang, map[i].iso))
+            return map[i].tess;
+    }
+    return NULL;
+}
+
+/**
+ * Lazy-init the OCR context for bitmap-to-text conversion.
+ * Language is read from the input stream metadata, defaulting to "eng".
+ */
+static int ensure_ocr_context(EncoderPriv *ep, OutputStream *ost)
+{
+    const char *lang = "eng";
+    const char *datapath = NULL;
+    const char *converted, *tess_lang;
+    AVDictionaryEntry *tag;
+    int ret;
+
+    if (ep->sub_ocr)
+        return 0;
+
+    ep->sub_ocr = avfilter_subtitle_ocr_alloc();
+    if (!ep->sub_ocr)
+        return AVERROR(ENOSYS);
+
+    /* CLI override takes priority over stream metadata */
+    if (ost->sub_ocr_lang) {
+        lang = ost->sub_ocr_lang;
+    } else if (ost->ist && ost->ist->st) {
+        /* Try to get language from input stream metadata */
+        tag = av_dict_get(ost->ist->st->metadata, "language", NULL, 0);
+        if (tag && tag->value && tag->value[0]) {
+            /* First check direct Tesseract mapping (handles chi->chi_tra etc.) */
+            tess_lang = iso639_to_tesseract(tag->value);
+            if (tess_lang) {
+                lang = tess_lang;
+            } else {
+                /* Convert ISO 639-2/B (MKV) to 639-2/T, then check again */
+                converted = ff_convert_lang_to(tag->value,
+                                                AV_LANG_ISO639_2_TERM);
+                if (converted) {
+                    tess_lang = iso639_to_tesseract(converted);
+                    lang = tess_lang ? tess_lang : converted;
+                } else {
+                    lang = tag->value;
+                }
+            }
+        }
+    }
+
+    if (ost->sub_ocr_datapath)
+        datapath = ost->sub_ocr_datapath;
+
+    av_log(&ep->e, AV_LOG_INFO,
+           "Initializing OCR with language '%s'\n", lang);
+
+    ret = avfilter_subtitle_ocr_init(ep->sub_ocr, lang, datapath);
+    if (ret < 0) {
+        av_log(&ep->e, AV_LOG_ERROR,
+               "Failed to initialize Tesseract OCR with language '%s'. "
+               "Is the training data installed?\n", lang);
+        avfilter_subtitle_ocr_freep(&ep->sub_ocr);
+        return ret;
+    }
+
+    /* Apply non-default page segmentation mode if requested */
+    if (ost->sub_ocr_pageseg_mode > 0) {
+        ret = avfilter_subtitle_ocr_set_pageseg_mode(ep->sub_ocr,
+                                                      ost->sub_ocr_pageseg_mode);
+        if (ret < 0) {
+            av_log(&ep->e, AV_LOG_ERROR,
+                   "Invalid OCR page segmentation mode %d\n",
+                   ost->sub_ocr_pageseg_mode);
+            avfilter_subtitle_ocr_freep(&ep->sub_ocr);
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Build an ASS dialogue line from OCR'd text with positioning tags.
+ * Returns an av_malloc'd string; caller frees with av_free().
+ */
+static char *build_ocr_ass_line(const EncoderPriv *ep, int is_ass_encoder,
+                                 int canvas_w, int canvas_h)
+{
+    int an = compute_alignment(ep->sub_ocr_dedup.first_x,
+                                ep->sub_ocr_dedup.first_y,
+                                ep->sub_ocr_dedup.prev_w,
+                                ep->sub_ocr_dedup.prev_h,
+                                canvas_w, canvas_h);
+
+    if (is_ass_encoder && ep->sub_ocr_dedup.position_changed) {
+        return av_asprintf(
+            "0,0,Default,,0,0,0,,{\\an7\\move(%d,%d,%d,%d)}%s",
+            ep->sub_ocr_dedup.first_x, ep->sub_ocr_dedup.first_y,
+            ep->sub_ocr_dedup.last_x, ep->sub_ocr_dedup.last_y,
+            ep->sub_ocr_dedup.prev_text);
+    } else if (is_ass_encoder) {
+        return av_asprintf(
+            "0,0,Default,,0,0,0,,{\\an7\\pos(%d,%d)}%s",
+            ep->sub_ocr_dedup.first_x, ep->sub_ocr_dedup.first_y,
+            ep->sub_ocr_dedup.prev_text);
+    }
+    return av_asprintf(
+        "0,0,Default,,0,0,0,,{\\an%d}%s",
+        an, ep->sub_ocr_dedup.prev_text);
+}
+
+/**
+ * Flush the buffered OCR dedup run as an encoded subtitle packet.
+ *
+ * Called when a new (different) bitmap arrives, or at end of stream.
+ * Constructs a synthetic AVSubtitle with a single SUBTITLE_ASS rect
+ * from the buffered OCR text and encodes it via the normal path.
+ */
+/**
+ * @param next_pts  PTS of the next subtitle event (AV_TIME_BASE units),
+ *                  or AV_NOPTS_VALUE at end of stream.  Used to compute
+ *                  actual duration when the decoder reports UINT32_MAX.
+ */
+static int flush_ocr_dedup(OutputFile *of, OutputStream *ost,
+                            AVPacket *pkt, int64_t next_pts)
+{
+    Encoder *e = ost->enc;
+    EncoderPriv *ep = ep_from_enc(e);
+    AVCodecContext *enc = e->enc_ctx;
+    AVSubtitle flush_sub = {0};
+    AVSubtitleRect flush_rect = {0};
+    AVSubtitleRect *flush_rects[1] = { &flush_rect };
+    uint32_t duration;
+    int64_t pts;
+    int canvas_w, canvas_h, is_ass_encoder;
+    int ret;
+
+    if (!ep->sub_ocr_dedup.prev_text)
+        return 0;
+
+    duration = ep->sub_ocr_dedup.run_end - ep->sub_ocr_dedup.run_start;
+
+    /* PGS decoder reports UINT32_MAX for end_display_time.  Compute
+     * actual duration from the next event's PTS when available. */
+    if (ep->sub_ocr_dedup.run_end == UINT32_MAX) {
+        if (next_pts != AV_NOPTS_VALUE && next_pts > ep->sub_ocr_dedup.run_pts) {
+            int64_t gap_us = next_pts - ep->sub_ocr_dedup.run_pts;
+            duration = (uint32_t)FFMIN(gap_us / 1000, UINT32_MAX - 1);
+        } else {
+            duration = 5000; /* fallback: 5 seconds */
+        }
+    }
+
+    /* Discard events shorter than minimum duration */
+    {
+        int min_dur = ost->sub_ocr_min_duration > 0
+                        ? ost->sub_ocr_min_duration
+                        : SUB_OCR_MIN_DURATION_MS;
+        if ((int)duration < min_dur) {
+            av_log(&ep->e, AV_LOG_DEBUG,
+                   "OCR: discarding short event (%ums < %dms)\n",
+                   duration, min_dur);
+            av_freep(&ep->sub_ocr_dedup.prev_text);
+            av_freep(&ep->sub_ocr_dedup.prev_bitmap);
+            ep->sub_ocr_dedup.prev_bitmap_size = 0;
+            return 0;
+        }
+    }
+
+    /* Resolve canvas dimensions */
+    canvas_w = enc->width;
+    canvas_h = enc->height;
+    if (canvas_w <= 0 || canvas_h <= 0) {
+        if (ost->ist && ost->ist->par) {
+            canvas_w = ost->ist->par->width;
+            canvas_h = ost->ist->par->height;
+        }
+    }
+    if (canvas_w <= 0) canvas_w = 1920;
+    if (canvas_h <= 0) canvas_h = 1080;
+
+    is_ass_encoder = (enc->codec_id == AV_CODEC_ID_ASS);
+
+    flush_rect.type = SUBTITLE_ASS;
+    flush_rect.ass  = build_ocr_ass_line(ep, is_ass_encoder,
+                                          canvas_w, canvas_h);
+    if (!flush_rect.ass) {
+        av_freep(&ep->sub_ocr_dedup.prev_text);
+        av_freep(&ep->sub_ocr_dedup.prev_bitmap);
+        ep->sub_ocr_dedup.prev_bitmap_size = 0;
+        return AVERROR(ENOMEM);
+    }
+
+    pts = ep->sub_ocr_dedup.run_pts;
+    if (of->start_time != AV_NOPTS_VALUE)
+        pts -= of->start_time;
+
+    flush_sub.pts                = pts;
+    flush_sub.start_display_time = 0;
+    flush_sub.end_display_time   = duration;
+    flush_sub.rects              = flush_rects;
+    flush_sub.num_rects          = 1;
+
+    ret = encode_subtitle_packet(ep, enc, &flush_sub, pts, pkt);
+
+    av_freep(&flush_rect.ass);
+    av_freep(&ep->sub_ocr_dedup.prev_text);
+    av_freep(&ep->sub_ocr_dedup.prev_bitmap);
+    ep->sub_ocr_dedup.prev_bitmap_size = 0;
+    ep->sub_ocr_dedup.position_changed = 0;
+
+    return ret;
+}
+
+/**
+ * Convert bitmap subtitle rects to text (ASS) via OCR.
+ *
+ * Symmetric to convert_text_to_bitmap(). Uses a buffered dedup model:
+ * each bitmap event is compared against the previous. Matching events
+ * (palette-only changes, e.g. PGS fades) extend the buffered run
+ * without calling OCR. When the bitmap changes, the previous run is
+ * flushed as an encoded subtitle packet. The current event is OCR'd
+ * and buffered as the start of a new run.
+ *
+ * The caller must call flush_ocr_dedup() at end of stream.
+ *
+ * Returns 1 if the subtitle was consumed (buffered/suppressed) and
+ * should NOT be encoded by the caller, 0 if no conversion was needed,
+ * or a negative AVERROR on failure.
+ */
+static int convert_bitmap_to_text(EncoderPriv *ep, OutputStream *ost,
+                                   OutputFile *of, AVSubtitle *sub,
+                                   AVPacket *pkt)
+{
+    AVCodecContext *enc_ctx = ep->e.enc_ctx;
+    const AVCodecDescriptor *enc_desc;
+    int need_convert = 0;
+    unsigned i;
+    int ret;
+
+    enc_desc = avcodec_descriptor_get(enc_ctx->codec_id);
+    if (!enc_desc || !(enc_desc->props & AV_CODEC_PROP_TEXT_SUB))
+        return 0;
+
+    for (i = 0; i < sub->num_rects; i++) {
+        if (sub->rects[i]->type == SUBTITLE_BITMAP) {
+            need_convert = 1;
+            break;
+        }
+    }
+    if (!need_convert)
+        return 0;
+
+    ret = ensure_ocr_context(ep, ost);
+    if (ret < 0)
+        return ret;
+
+    for (i = 0; i < sub->num_rects; i++) {
+        AVSubtitleRect *rect = sub->rects[i];
+        uint8_t *gray = NULL;
+        char *text = NULL;
+        int gw, gh, confidence;
+        int bitmap_size;
+
+        if (rect->type != SUBTITLE_BITMAP)
+            continue;
+
+        if (!rect->data[0] || !rect->data[1] ||
+            rect->w <= 0 || rect->h <= 0)
+            continue;
+
+        if ((int64_t)rect->h * rect->linesize[0] > INT_MAX)
+            continue;
+        bitmap_size = rect->h * rect->linesize[0];
+        if (bitmap_size <= 0)
+            continue;
+
+        /* Bitmap deduplication: compare indexed pixels with previous */
+        if (ep->sub_ocr_dedup.prev_bitmap &&
+            ep->sub_ocr_dedup.prev_bitmap_size == bitmap_size &&
+            ep->sub_ocr_dedup.prev_w == rect->w &&
+            ep->sub_ocr_dedup.prev_h == rect->h &&
+            memcmp(ep->sub_ocr_dedup.prev_bitmap,
+                   rect->data[0], bitmap_size) == 0) {
+            /* Same bitmap -- extend the run, skip OCR */
+            ep->sub_ocr_dedup.run_end = sub->end_display_time;
+
+            /* Track position changes for movement detection */
+            if (rect->x != ep->sub_ocr_dedup.last_x ||
+                rect->y != ep->sub_ocr_dedup.last_y) {
+                ep->sub_ocr_dedup.position_changed = 1;
+                ep->sub_ocr_dedup.last_x = rect->x;
+                ep->sub_ocr_dedup.last_y = rect->y;
+            }
+
+            av_log(&ep->e, AV_LOG_DEBUG,
+                   "OCR: bitmap dedup match, extending to %u ms\n",
+                   ep->sub_ocr_dedup.run_end);
+            return 1; /* consumed */
+        }
+
+        /* Bitmap changed -- flush previous buffered run.
+         * Use current event's PTS as the end of the previous run. */
+        ret = flush_ocr_dedup(of, ost, pkt, sub->pts);
+        if (ret < 0)
+            return ret;
+
+        /* Convert to grayscale */
+        gray = bitmap_to_grayscale(rect, &gw, &gh);
+        if (!gray)
+            return AVERROR(ENOMEM);
+
+        /* Run OCR */
+        ret = avfilter_subtitle_ocr_recognize(ep->sub_ocr,
+                                               gray, 1, gw, gw, gh,
+                                               &text, &confidence);
+        if (ret < 0) {
+            av_free(gray);
+            return ret;
+        }
+
+        /* PSM fallback: PSM 6 (uniform block) fails for some RTL and
+         * complex scripts.  If the result is empty or very short for
+         * a bitmap wide enough to contain text, retry with PSM 7
+         * (single text line) which skips layout analysis. */
+        if ((!text || strlen(text) < 3) && rect->w > 100) {
+            av_free(text);
+            text = NULL;
+            avfilter_subtitle_ocr_set_pageseg_mode(ep->sub_ocr, 7);
+            ret = avfilter_subtitle_ocr_recognize(ep->sub_ocr,
+                                                   gray, 1, gw, gw, gh,
+                                                   &text, &confidence);
+            avfilter_subtitle_ocr_set_pageseg_mode(ep->sub_ocr, 6);
+            if (ret < 0) {
+                av_free(gray);
+                return ret;
+            }
+            if (text && strlen(text) > 0)
+                av_log(&ep->e, AV_LOG_DEBUG,
+                       "OCR: PSM 7 fallback succeeded for rect %u\n", i);
+        }
+        av_free(gray);
+
+        if (!text || strlen(text) == 0) {
+            av_log(&ep->e, AV_LOG_DEBUG,
+                   "OCR: empty result for rect %u\n", i);
+            av_free(text);
+            return 1; /* consumed (nothing to emit) */
+        }
+
+        /* Strip leading and trailing whitespace.
+         * RTL scripts often produce leading spaces in Tesseract output. */
+        {
+            int len = strlen(text);
+            int start = 0;
+            while (len > 0 && (text[len - 1] == '\n' ||
+                               text[len - 1] == '\r' ||
+                               text[len - 1] == ' '))
+                text[--len] = '\0';
+            while (text[start] == ' ' || text[start] == '\n' ||
+                   text[start] == '\r')
+                start++;
+            if (start > 0)
+                memmove(text, text + start, len - start + 1);
+        }
+
+        /* RTL period fixup: move leading '.' to end of its line. */
+        for (char *p = text; *p; ) {
+            char *line = p;
+            char *eol  = strchr(p, '\n');
+            int llen   = eol ? (int)(eol - line) : (int)strlen(line);
+            if (*line == '.' && llen > 1 && line[1] != '.') {
+                memmove(line, line + 1, llen - 1);
+                line[llen - 1] = '.';
+            }
+            p = eol ? eol + 1 : line + llen;
+        }
+
+        if (confidence >= 0 && confidence < 50) {
+            av_log(&ep->e, AV_LOG_WARNING,
+                   "OCR: low confidence %d%% for '%s'\n",
+                   confidence, text);
+        }
+
+        /* Cache bitmap for deduplication */
+        av_freep(&ep->sub_ocr_dedup.prev_bitmap);
+        ep->sub_ocr_dedup.prev_bitmap = av_memdup(rect->data[0],
+                                                    bitmap_size);
+        ep->sub_ocr_dedup.prev_bitmap_size = bitmap_size;
+        ep->sub_ocr_dedup.prev_w = rect->w;
+        ep->sub_ocr_dedup.prev_h = rect->h;
+        ep->sub_ocr_dedup.prev_x = rect->x;
+        ep->sub_ocr_dedup.prev_y = rect->y;
+
+        /* Buffer the new run */
+        av_freep(&ep->sub_ocr_dedup.prev_text);
+        ep->sub_ocr_dedup.prev_text = text;
+        ep->sub_ocr_dedup.run_pts   = sub->pts;
+        ep->sub_ocr_dedup.run_start = sub->start_display_time;
+        ep->sub_ocr_dedup.run_end   = sub->end_display_time;
+        ep->sub_ocr_dedup.first_x   = rect->x;
+        ep->sub_ocr_dedup.first_y   = rect->y;
+        ep->sub_ocr_dedup.last_x    = rect->x;
+        ep->sub_ocr_dedup.last_y    = rect->y;
+        ep->sub_ocr_dedup.position_changed = 0;
+
+        return 1; /* consumed (buffered for later flush) */
+    }
 
     return 0;
 }
@@ -1548,6 +2185,17 @@ static int do_subtitle_out(OutputFile *of, OutputStream *ost, AVSubtitle *sub,
     if (ret < 0)
         return ret;
 
+    /* Convert bitmap subtitles to text via OCR if encoder requires it.
+     * Returns 1 if the event was consumed (buffered for dedup), in which
+     * case the caller should not encode it -- the buffered run will be
+     * flushed and encoded when the next different bitmap arrives or at
+     * end of stream. */
+    ret = convert_bitmap_to_text(ep, ost, of, sub, pkt);
+    if (ret < 0)
+        return ret;
+    if (ret == 1)
+        return 0; /* event consumed by OCR dedup buffer */
+
     /* Note: DVB subtitle need one packet to draw them and one other
        packet to clear them */
     /* XXX: signal it in the codec context ? */
@@ -1946,7 +2594,12 @@ static int frame_encode(OutputStream *ost, AVFrame *frame, AVPacket *pkt)
         if (subtitle && subtitle->num_rects)
             return do_subtitle_out(of, ost, subtitle, pkt);
 
-        /* End of stream: flush any pending coalesced events */
+        /* End of stream: flush any pending buffered events */
+        {
+            int ret = flush_ocr_dedup(of, ost, pkt, AV_NOPTS_VALUE);
+            if (ret < 0)
+                return ret;
+        }
         return flush_coalesced_subtitles(of, ost, pkt);
     }
 

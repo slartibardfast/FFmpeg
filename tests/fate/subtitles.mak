@@ -168,3 +168,15 @@ fate-sub-%: CMP = rawdiff
 
 FATE_SAMPLES_FFMPEG += $(FATE_SUBTITLES)
 fate-subtitles: $(FATE_SUBTITLES)
+
+# OCR roundtrip test (no external samples needed)
+FATE_SUBTITLES_OCR-$(call ALLYES, SRT_DEMUXER SUBRIP_DECODER PGSSUB_ENCODER \
+                         LIBASS SUP_DEMUXER PGSSUB_DECODER \
+                         LIBTESSERACT SUBRIP_ENCODER SRT_MUXER) \
+    += fate-sub-ocr-roundtrip
+fate-sub-ocr-roundtrip: CMD = transcode srt $(SRC_PATH)/tests/data/sub-ocr-roundtrip.srt \
+    sup "-map 0:s -c:s pgssub -s 1920x1080" "-map 0:s -c:s srt"
+fate-sub-ocr-roundtrip: CMP = null
+
+FATE_FFMPEG += $(FATE_SUBTITLES_OCR-yes)
+fate-subtitles: $(FATE_SUBTITLES_OCR-yes)
