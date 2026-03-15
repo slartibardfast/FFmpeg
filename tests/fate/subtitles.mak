@@ -61,6 +61,19 @@ fate-sub-mpsub-frames: CMD = fmtstdout ass -i $(TARGET_SAMPLES)/sub/MPSub_capabi
 FATE_SUBTITLES-$(call REMUX, SUP) += fate-sub-pgs-remux
 fate-sub-pgs-remux: CMD = transcode sup $(TARGET_SAMPLES)/sub/pgs_sub.sup sup "-copyts -c:s copy" "-copyts -c:s copy"
 
+FATE_SUBTITLES-$(call FRAMECRC, SUP, PGSSUB, PGSSUB_ENCODER) += fate-sub-pgs
+fate-sub-pgs: CMD = framecrc -i $(TARGET_SAMPLES)/sub/pgs_sub.sup -map s:0 -c pgssub
+
+# OCR roundtrip test (no external samples needed)
+FATE_SUBTITLES_OCR-$(call ALLYES, SRT_DEMUXER SUBRIP_DECODER PGSSUB_ENCODER \
+    SUBRIP_ENCODER LIBASS LIBTESSERACT SUP_MUXER SUP_DEMUXER PGSSUB_DECODER) \
+    += fate-sub-ocr-roundtrip
+fate-sub-ocr-roundtrip: CMD = transcode srt $(SRC_PATH)/tests/data/sub-ocr-roundtrip.srt \
+    sup "-map 0:s -c:s pgssub -s 1920x1080" "-map 0:s -c:s srt"
+fate-sub-ocr-roundtrip: CMP = null
+FATE_FFMPEG += $(FATE_SUBTITLES_OCR-yes)
+fate-subtitles: $(FATE_SUBTITLES_OCR-yes)
+
 FATE_SUBTITLES_ASS-$(call DEMDEC, PJS, PJS) += fate-sub-pjs
 fate-sub-pjs: CMD = fmtstdout ass -i $(TARGET_SAMPLES)/sub/PJS_capability_tester.pjs
 

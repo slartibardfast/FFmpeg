@@ -884,10 +884,28 @@ static int new_stream_subtitle(Muxer *mux, const OptionsContext *o,
         if (output_descriptor)
             output_props = output_descriptor->props & (AV_CODEC_PROP_TEXT_SUB | AV_CODEC_PROP_BITMAP_SUB);
         if (input_props && output_props && input_props != output_props) {
-            av_log(ost, AV_LOG_ERROR,
-                   "Subtitle encoding currently only possible from text to text "
-                   "or bitmap to bitmap\n");
-            return AVERROR(EINVAL);
+            if ((input_props & AV_CODEC_PROP_TEXT_SUB) &&
+                (output_props & AV_CODEC_PROP_BITMAP_SUB)) {
+#if !CONFIG_LIBASS
+                av_log(ost, AV_LOG_ERROR,
+                       "Text to bitmap subtitle conversion requires "
+                       "libass (configure with --enable-libass)\n");
+                return AVERROR(ENOSYS);
+#endif
+            } else if ((input_props & AV_CODEC_PROP_BITMAP_SUB) &&
+                       (output_props & AV_CODEC_PROP_TEXT_SUB)) {
+#if !CONFIG_LIBTESSERACT
+                av_log(ost, AV_LOG_ERROR,
+                       "Bitmap to text subtitle conversion requires "
+                       "libtesseract (--enable-libtesseract)\n");
+                return AVERROR(ENOSYS);
+#endif
+            } else {
+                av_log(ost, AV_LOG_ERROR,
+                       "Subtitle encoding currently only possible from "
+                       "text to text or bitmap to bitmap\n");
+                return AVERROR(EINVAL);
+            }
         }
     }
 
@@ -1517,6 +1535,22 @@ static int ost_add(Muxer *mux, const OptionsContext *o, enum AVMediaType type,
 
     opt_match_per_stream_int(ost, &o->fix_sub_duration_heartbeat,
                              oc, st, &ost->fix_sub_duration_heartbeat);
+
+    {
+        const char *tmp;
+        tmp = NULL;
+        opt_match_per_stream_str(ost, &o->sub_ocr_lang, oc, st, &tmp);
+        if (tmp)
+            ost->sub_ocr_lang = av_strdup(tmp);
+        tmp = NULL;
+        opt_match_per_stream_str(ost, &o->sub_ocr_datapath, oc, st, &tmp);
+        if (tmp)
+            ost->sub_ocr_datapath = av_strdup(tmp);
+    }
+    opt_match_per_stream_int(ost, &o->sub_ocr_pageseg_mode, oc, st,
+                             &ost->sub_ocr_pageseg_mode);
+    opt_match_per_stream_int(ost, &o->sub_ocr_min_duration, oc, st,
+                             &ost->sub_ocr_min_duration);
 
     if (oc->oformat->flags & AVFMT_GLOBALHEADER && ost->enc)
         ost->enc->enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
