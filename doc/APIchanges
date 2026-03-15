@@ -2,6 +2,9 @@ The last version increases of all libraries were on 2025-03-28
 
 API changes, most recent first:
 
+2026-03-xx - xxxxxxxxxx - lavu 60.32.100 - quantize.h
+  Add av_quantize_add_region().
+
 2026-02-xx - xxxxxxxxxx - lavu 60.30.100 - quantize.h
   Add color quantization API:
     - Add av_quantize_alloc().
