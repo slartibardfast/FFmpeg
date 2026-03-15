@@ -13,6 +13,7 @@ include $(SRC_PATH)/fftools/resources/Makefile
 
 OBJS-ffmpeg +=                  \
     fftools/ffmpeg_dec.o        \
+    fftools/ffmpeg_dec_sub.o    \
     fftools/ffmpeg_demux.o      \
     fftools/ffmpeg_enc.o        \
     fftools/ffmpeg_enc_sub.o    \
