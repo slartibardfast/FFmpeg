@@ -2,6 +2,8 @@ Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
 version <next>:
+- HDMV PGS subtitle encoder
+- AV_CODEC_PROP_EXPLICIT_END for subtitle clear signaling
 - Extend AMF Color Converter (vf_vpp_amf) HDR capabilities
 - LCEVC track muxing support in MP4 muxer
 

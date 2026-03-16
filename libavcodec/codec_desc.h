@@ -114,11 +114,28 @@ typedef struct AVCodecDescriptor {
  * Decoded AVSubtitle data can be read from the AVSubtitleRect->ass field.
  */
 #define AV_CODEC_PROP_TEXT_SUB      (1 << 17)
+/**
+ * Subtitle codec requires explicit end-of-display signaling.
+ * After encoding a subtitle with num_rects > 0, the caller must
+ * encode a second subtitle with num_rects = 0 at PTS + duration
+ * to clear the display. Without this, subtitles persist on screen
+ * until replaced by the next event.
+ */
+#define AV_CODEC_PROP_EXPLICIT_END  (1 << 18)
 
 /**
  * @return descriptor for given codec ID or NULL if no descriptor exists.
  */
 const AVCodecDescriptor *avcodec_descriptor_get(enum AVCodecID id);
+
+/**
+ * Check if a subtitle codec requires explicit end-of-display events.
+ */
+static inline int av_subtitle_needs_clear(enum AVCodecID codec_id)
+{
+    const AVCodecDescriptor *desc = avcodec_descriptor_get(codec_id);
+    return desc && (desc->props & AV_CODEC_PROP_EXPLICIT_END);
+}
 
 /**
  * Iterate over all codec descriptors known to libavcodec.
