@@ -3581,7 +3581,7 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .type      = AVMEDIA_TYPE_SUBTITLE,
         .name      = "dvb_subtitle",
         .long_name = NULL_IF_CONFIG_SMALL("DVB subtitles"),
-        .props     = AV_CODEC_PROP_BITMAP_SUB,
+        .props     = AV_CODEC_PROP_BITMAP_SUB | AV_CODEC_PROP_EXPLICIT_END,
     },
     {
         .id        = AV_CODEC_ID_TEXT,
@@ -3616,7 +3616,7 @@ static const AVCodecDescriptor codec_descriptors[] = {
         .type      = AVMEDIA_TYPE_SUBTITLE,
         .name      = "hdmv_pgs_subtitle",
         .long_name = NULL_IF_CONFIG_SMALL("HDMV Presentation Graphic Stream subtitles"),
-        .props     = AV_CODEC_PROP_BITMAP_SUB,
+        .props     = AV_CODEC_PROP_BITMAP_SUB | AV_CODEC_PROP_EXPLICIT_END,
     },
     {
         .id        = AV_CODEC_ID_DVB_TELETEXT,
