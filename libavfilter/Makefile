@@ -8,6 +8,7 @@ HEADERS = avfilter.h                                                    \
           version_major.h                                               \
 
 OBJS = allfilters.o                                                     \
+       subtitle_ocr.o                                                     \
        subtitle_render.o                                                 \
        audio.o                                                          \
        avfilter.o                                                       \
