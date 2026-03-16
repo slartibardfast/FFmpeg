@@ -18,11 +18,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef AVCODEC_ELBG_H
-#define AVCODEC_ELBG_H
+#ifndef AVUTIL_ELBG_H
+#define AVUTIL_ELBG_H
 
 #include <stdint.h>
-#include "libavutil/lfg.h"
+#include "lfg.h"
 
 struct ELBGContext;
 
@@ -54,4 +54,4 @@ int avpriv_elbg_do(struct ELBGContext **ctx, int *points, int dim,
  */
 void avpriv_elbg_free(struct ELBGContext **ctx);
 
-#endif /* AVCODEC_ELBG_H */
+#endif /* AVUTIL_ELBG_H */
