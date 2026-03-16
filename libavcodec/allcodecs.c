@@ -740,6 +740,7 @@ extern const FFCodec ff_movtext_encoder;
 extern const FFCodec ff_movtext_decoder;
 extern const FFCodec ff_mpl2_decoder;
 extern const FFCodec ff_pgssub_decoder;
+extern const FFCodec ff_pgssub_encoder;
 extern const FFCodec ff_pjs_decoder;
 extern const FFCodec ff_realtext_decoder;
 extern const FFCodec ff_sami_decoder;
