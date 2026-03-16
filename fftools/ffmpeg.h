@@ -240,6 +240,10 @@ typedef struct OptionsContext {
     SpecifierOptList fix_sub_duration;
     SpecifierOptList fix_sub_duration_heartbeat;
     SpecifierOptList canvas_sizes;
+    SpecifierOptList sub_ocr_lang;
+    SpecifierOptList sub_ocr_datapath;
+    SpecifierOptList sub_ocr_pageseg_mode;
+    SpecifierOptList sub_ocr_min_duration;
     SpecifierOptList forced_subs_filter;
     SpecifierOptList pass;
     SpecifierOptList passlogfiles;
@@ -701,6 +705,12 @@ typedef struct OutputStream {
      * subtitles utilizing fix_sub_duration at random access points.
      */
     unsigned int fix_sub_duration_heartbeat;
+
+    /* subtitle OCR options (bitmap-to-text conversion) */
+    char *sub_ocr_lang;
+    char *sub_ocr_datapath;
+    int         sub_ocr_pageseg_mode;
+    int         sub_ocr_min_duration;
 
     /* forced subtitle filter: 0=all (default), 1=forced only, 2=non-forced only */
 #define SUB_FORCED_ALL       0
