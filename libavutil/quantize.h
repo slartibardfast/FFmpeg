@@ -50,6 +50,7 @@
 
 enum AVQuantizeAlgorithm {
     AV_QUANTIZE_NEUQUANT,    /**< NeuQuant neural-net quantizer (Dekker 1994) */
+    AV_QUANTIZE_MEDIAN_CUT,  /**< Median Cut quantizer (Heckbert 1982) */
 };
 
 /**
@@ -122,7 +123,11 @@ int av_quantize_add_region(AVQuantizeContext *ctx,
  * @param[in]  nb_pixels number of pixels in the input (max INT_MAX,
  *                        ~536M pixels), or 0 when regions are used
  * @param[out] palette   output palette in 0xAARRGGBB format
- * @param[in]  quality   learning quality 1 (fast) to 30 (best), 10 typical
+ * @param[in]  quality   algorithm-specific quality hint (1-30).
+ *                        NeuQuant: controls sampling rate (1 = fast,
+ *                        30 = best).  Median Cut: ignored.  ELBG: maps
+ *                        to iteration steps (1-10 = 1, 11-20 = 2,
+ *                        21-30 = 3).
  * @return number of palette entries on success, negative AVERROR on failure
  */
 int av_quantize_generate_palette(AVQuantizeContext *ctx,

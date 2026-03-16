@@ -22,6 +22,7 @@
 
 #include "common.h"
 #include "error.h"
+#include "mediancut.h"
 #include "mem.h"
 #include "neuquant.h"
 #include "quantize.h"
@@ -41,6 +42,7 @@ struct AVQuantizeContext {
     enum AVQuantizeAlgorithm algorithm;
     int max_colors;
     FFNeuQuantContext *nq;
+    AVPrivMedianCutContext *mc;
     QuantizeRegion regions[MAX_REGIONS];
     int nb_regions;
 };
@@ -68,6 +70,13 @@ AVQuantizeContext *av_quantize_alloc(enum AVQuantizeAlgorithm algorithm,
             return NULL;
         }
         break;
+    case AV_QUANTIZE_MEDIAN_CUT:
+        ctx->mc = avpriv_mediancut_alloc(max_colors);
+        if (!ctx->mc) {
+            av_freep(&ctx);
+            return NULL;
+        }
+        break;
     default:
         av_freep(&ctx);
         return NULL;
@@ -89,6 +98,7 @@ void av_quantize_freep(AVQuantizeContext **pctx)
         AVQuantizeContext *ctx = *pctx;
         free_regions(ctx);
         ff_neuquant_free(&ctx->nq);
+        avpriv_mediancut_free(&ctx->mc);
         av_freep(pctx);
     }
 }
@@ -200,6 +210,26 @@ int av_quantize_generate_palette(AVQuantizeContext *ctx,
         free_regions(ctx);
         return ctx->max_colors;
 
+    case AV_QUANTIZE_MEDIAN_CUT:
+        if (ctx->nb_regions > 0) {
+            int max_px = 0, per_region, total;
+            uint8_t *samples;
+
+            for (int r = 0; r < ctx->nb_regions; r++)
+                max_px = FFMAX(max_px, ctx->regions[r].nb_pixels);
+            per_region = FFMIN(max_px, SAMPLES_PER_REGION);
+
+            samples = build_region_samples(ctx, per_region, &total);
+            if (!samples) {
+                free_regions(ctx);
+                return AVERROR(ENOMEM);
+            }
+
+            ret = avpriv_mediancut_learn(ctx->mc, samples, total);
+            av_free(samples);
+            if (ret < 0) {
+                free_regions(ctx);
+                return ret;
             }
         } else {
             ret = avpriv_mediancut_learn(ctx->mc, rgba, nb_pixels);
@@ -229,6 +259,16 @@ int av_quantize_apply(AVQuantizeContext *ctx,
         for (int i = 0; i < nb_pixels; i++) {
             const uint8_t *p = rgba + (size_t)i * 4;
             indices[i] = ff_neuquant_map_pixel(ctx->nq, p[0], p[1], p[2], p[3]);
+        }
+        return 0;
+
+    case AV_QUANTIZE_MEDIAN_CUT:
+        if (!avpriv_mediancut_is_trained(ctx->mc))
+            return AVERROR(EINVAL);
+        for (int i = 0; i < nb_pixels; i++) {
+            const uint8_t *p = rgba + (size_t)i * 4;
+            indices[i] = avpriv_mediancut_map_pixel(ctx->mc,
+                                                p[0], p[1], p[2], p[3]);
         }
         return 0;
 
