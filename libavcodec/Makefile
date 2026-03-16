@@ -190,8 +190,8 @@ OBJS-$(CONFIG_WMV2DSP)                 += wmv2dsp.o
 
 # decoders/encoders
 OBJS-$(CONFIG_ZERO12V_DECODER)         += 012v.o
-OBJS-$(CONFIG_A64MULTI_ENCODER)        += a64multienc.o elbg.o
-OBJS-$(CONFIG_A64MULTI5_ENCODER)       += a64multienc.o elbg.o
+OBJS-$(CONFIG_A64MULTI_ENCODER)        += a64multienc.o
+OBJS-$(CONFIG_A64MULTI5_ENCODER)       += a64multienc.o
 OBJS-$(CONFIG_AAC_DECODER)             += aactab.o \
                                           aacsbr.o aacps_common.o aacps_float.o \
                                           kbdwin.o \
@@ -313,7 +313,7 @@ OBJS-$(CONFIG_CDXL_DECODER)            += cdxl.o
 OBJS-$(CONFIG_CFHD_DECODER)            += cfhd.o cfhddata.o cfhddsp.o
 OBJS-$(CONFIG_CFHD_ENCODER)            += cfhdenc.o cfhddata.o cfhdencdsp.o
 OBJS-$(CONFIG_CINEPAK_DECODER)         += cinepak.o
-OBJS-$(CONFIG_CINEPAK_ENCODER)         += cinepakenc.o elbg.o
+OBJS-$(CONFIG_CINEPAK_ENCODER)         += cinepakenc.o
 OBJS-$(CONFIG_CLEARVIDEO_DECODER)      += clearvideo.o
 OBJS-$(CONFIG_CLJR_DECODER)            += cljrdec.o
 OBJS-$(CONFIG_CLJR_ENCODER)            += cljrenc.o
@@ -600,7 +600,7 @@ OBJS-$(CONFIG_MSRLE_DECODER)           += msrle.o msrledec.o
 OBJS-$(CONFIG_MSS1_DECODER)            += mss1.o mss12.o
 OBJS-$(CONFIG_MSS2_DECODER)            += mss2.o mss12.o mss2dsp.o wmv2data.o
 OBJS-$(CONFIG_MSVIDEO1_DECODER)        += msvideo1.o
-OBJS-$(CONFIG_MSVIDEO1_ENCODER)        += msvideo1enc.o elbg.o
+OBJS-$(CONFIG_MSVIDEO1_ENCODER)        += msvideo1enc.o
 OBJS-$(CONFIG_MSZH_DECODER)            += lcldec.o
 OBJS-$(CONFIG_MTS2_DECODER)            += mss4.o
 OBJS-$(CONFIG_MV30_DECODER)            += mv30.o
@@ -682,7 +682,7 @@ OBJS-$(CONFIG_REALTEXT_DECODER)        += realtextdec.o ass.o
 OBJS-$(CONFIG_RKA_DECODER)             += rka.o
 OBJS-$(CONFIG_RL2_DECODER)             += rl2.o
 OBJS-$(CONFIG_ROQ_DECODER)             += roqvideodec.o roqvideo.o
-OBJS-$(CONFIG_ROQ_ENCODER)             += roqvideoenc.o roqvideo.o elbg.o
+OBJS-$(CONFIG_ROQ_ENCODER)             += roqvideoenc.o roqvideo.o
 OBJS-$(CONFIG_ROQ_DPCM_DECODER)        += dpcm.o
 OBJS-$(CONFIG_ROQ_DPCM_ENCODER)        += roqaudioenc.o
 OBJS-$(CONFIG_RPZA_DECODER)            += rpza.o
@@ -1143,9 +1143,6 @@ STLIBOBJS-$(CONFIG_RTPDEC)             += jpegtables.o
 STLIBOBJS-$(CONFIG_RTP_MUXER)          += golomb.o jpegtables.o \
                                           mpeg4audio_sample_rates.o
 STLIBOBJS-$(CONFIG_SPDIF_MUXER)        += dca_sample_rate_tab.o
-
-# libavfilter dependencies
-OBJS-$(CONFIG_ELBG_FILTER)             += elbg.o
 
 # external codec libraries
 OBJS-$(CONFIG_AAC_AT_DECODER)             += audiotoolboxdec.o
