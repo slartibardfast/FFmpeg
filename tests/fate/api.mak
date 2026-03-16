@@ -60,6 +60,26 @@ FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-overlap-verify
 fate-api-pgs-overlap-verify: $(APITESTSDIR)/api-pgs-overlap-verify-test$(EXESUF)
 fate-api-pgs-overlap-verify: CMD = run $(APITESTSDIR)/api-pgs-overlap-verify-test$(EXESUF)
 fate-api-pgs-overlap-verify: CMP = null
+FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-animation-util
+fate-api-pgs-animation-util: $(APITESTSDIR)/api-pgs-animation-util-test$(EXESUF)
+fate-api-pgs-animation-util: CMD = run $(APITESTSDIR)/api-pgs-animation-util-test$(EXESUF)
+fate-api-pgs-animation-util: CMP = null
+
+FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-animation-timing
+fate-api-pgs-animation-timing: $(APITESTSDIR)/api-pgs-animation-timing-test$(EXESUF)
+fate-api-pgs-animation-timing: CMD = run $(APITESTSDIR)/api-pgs-animation-timing-test$(EXESUF)
+fate-api-pgs-animation-timing: CMP = null
+
+FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-coalesce
+fate-api-pgs-coalesce: $(APITESTSDIR)/api-pgs-coalesce-test$(EXESUF)
+fate-api-pgs-coalesce: CMD = run $(APITESTSDIR)/api-pgs-coalesce-test$(EXESUF)
+fate-api-pgs-coalesce: CMP = null
+
+FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-rectsplit
+fate-api-pgs-rectsplit: $(APITESTSDIR)/api-pgs-rectsplit-test$(EXESUF)
+fate-api-pgs-rectsplit: CMD = run $(APITESTSDIR)/api-pgs-rectsplit-test$(EXESUF)
+fate-api-pgs-rectsplit: CMP = null
+
 FATE_API_LIBAVFORMAT-yes += $(if $(findstring fate-lavf-flv,$(FATE_LAVF_CONTAINER)),fate-api-seek)
 fate-api-seek: $(APITESTSDIR)/api-seek-test$(EXESUF) fate-lavf-flv
 fate-lavf-flv: KEEP_FILES ?= 1

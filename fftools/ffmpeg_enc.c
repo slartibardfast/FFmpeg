@@ -20,6 +20,8 @@
 #include <stdint.h>
 
 #include "ffmpeg.h"
+#include "ffmpeg_enc_sub.h"
+#include "ffmpeg_dec_sub.h"
 
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
@@ -38,6 +40,8 @@
 #include "libavutil/timestamp.h"
 
 #include "libavcodec/avcodec.h"
+#include "libavcodec/ass.h"
+#include "libavcodec/codec_desc.h"
 
 typedef struct EncoderPriv {
     Encoder        e;
@@ -56,6 +60,9 @@ typedef struct EncoderPriv {
 
     Scheduler      *sch;
     unsigned        sch_idx;
+
+    SubtitleEncContext *sub_enc;
+    SubtitleDecContext *sub_dec;
 } EncoderPriv;
 
 static EncoderPriv *ep_from_enc(Encoder *enc)
@@ -72,9 +79,14 @@ typedef struct EncoderThread {
 void enc_free(Encoder **penc)
 {
     Encoder *enc = *penc;
+    EncoderPriv *ep;
 
     if (!enc)
         return;
+
+    ep = ep_from_enc(enc);
+    enc_sub_free(&ep->sub_enc);
+    dec_sub_free(&ep->sub_dec);
 
     if (enc->enc_ctx)
         av_freep(&enc->enc_ctx->stats_in);
@@ -319,6 +331,62 @@ int enc_open(void *opaque, const AVFrame *frame)
             memcpy(enc_ctx->subtitle_header, dec->subtitle_header,
                    dec->subtitle_header_size);
             enc_ctx->subtitle_header_size = dec->subtitle_header_size;
+        } else {
+            const AVCodecDescriptor *in_desc, *out_desc;
+            in_desc  = avcodec_descriptor_get(ost->ist->par->codec_id);
+            out_desc = avcodec_descriptor_get(enc_ctx->codec_id);
+            /* Bitmap-to-text: provide an ASS header with PlayRes
+             * matching the source video dimensions so that \pos()
+             * coordinates from the bitmap rects are meaningful. */
+            if (in_desc && out_desc &&
+                (in_desc->props & AV_CODEC_PROP_BITMAP_SUB) &&
+                (out_desc->props & AV_CODEC_PROP_TEXT_SUB)) {
+                int play_res_x = ost->ist->par->width;
+                int play_res_y = ost->ist->par->height;
+                if (play_res_x <= 0) play_res_x = enc_ctx->width;
+                if (play_res_y <= 0) play_res_y = enc_ctx->height;
+                if (play_res_x <= 0) play_res_x = 1920;
+                if (play_res_y <= 0) play_res_y = 1080;
+                ret = ff_ass_subtitle_header_full(enc_ctx,
+                    play_res_x, play_res_y,
+                    ASS_DEFAULT_FONT, ASS_DEFAULT_FONT_SIZE,
+                    ASS_DEFAULT_COLOR, ASS_DEFAULT_COLOR,
+                    ASS_DEFAULT_BACK_COLOR, ASS_DEFAULT_BACK_COLOR,
+                    ASS_DEFAULT_BOLD, ASS_DEFAULT_ITALIC,
+                    ASS_DEFAULT_UNDERLINE,
+                    ASS_DEFAULT_BORDERSTYLE, ASS_DEFAULT_ALIGNMENT);
+                if (ret < 0)
+                    return ret;
+            }
+        }
+
+        /* Initialize subtitle conversion contexts based on codec types */
+        {
+            const AVCodecDescriptor *in_desc, *out_desc;
+            int in_props = 0, out_props = 0;
+            in_desc  = avcodec_descriptor_get(ost->ist->par->codec_id);
+            out_desc = avcodec_descriptor_get(enc_ctx->codec_id);
+            if (in_desc)
+                in_props = in_desc->props & (AV_CODEC_PROP_TEXT_SUB | AV_CODEC_PROP_BITMAP_SUB);
+            if (out_desc)
+                out_props = out_desc->props & (AV_CODEC_PROP_TEXT_SUB | AV_CODEC_PROP_BITMAP_SUB);
+
+            if ((in_props & AV_CODEC_PROP_TEXT_SUB) &&
+                (out_props & AV_CODEC_PROP_BITMAP_SUB)) {
+                ep->sub_enc = enc_sub_alloc(ep->sch, ep->sch_idx);
+                if (!ep->sub_enc)
+                    return AVERROR(ENOMEM);
+            } else if ((in_props & AV_CODEC_PROP_BITMAP_SUB) &&
+                       (out_props & AV_CODEC_PROP_TEXT_SUB)) {
+                ep->sub_dec = dec_sub_alloc(ep->sch, ep->sch_idx);
+                if (!ep->sub_dec)
+                    return AVERROR(ENOMEM);
+                dec_sub_set_options(ep->sub_dec,
+                                   ost->sub_ocr_lang,
+                                   ost->sub_ocr_datapath,
+                                   ost->sub_ocr_pageseg_mode,
+                                   ost->sub_ocr_min_duration);
+            }
         }
 
         break;
@@ -377,13 +445,14 @@ static int check_recording_time(OutputStream *ost, int64_t ts, AVRational tb)
     return 1;
 }
 
-static int do_subtitle_out(OutputFile *of, OutputStream *ost, const AVSubtitle *sub,
+static int do_subtitle_out(OutputFile *of, OutputStream *ost, AVSubtitle *sub,
                            AVPacket *pkt)
 {
     Encoder *e = ost->enc;
     EncoderPriv *ep = ep_from_enc(e);
     int subtitle_out_max_size = 1024 * 1024;
     int subtitle_out_size, nb, i, ret;
+    int needs_clear;
     AVCodecContext *enc;
     int64_t pts;
 
@@ -396,10 +465,29 @@ static int do_subtitle_out(OutputFile *of, OutputStream *ost, const AVSubtitle *
 
     enc = e->enc_ctx;
 
-    /* Note: DVB subtitle need one packet to draw them and one other
-       packet to clear them */
-    /* XXX: signal it in the codec context ? */
-    if (enc->codec_id == AV_CODEC_ID_DVB_SUBTITLE)
+    /* Text-to-bitmap conversion (e.g. SRT/ASS -> PGS) */
+    if (ep->sub_enc) {
+        ret = enc_sub_process(ep->sub_enc, of, ost, sub, pkt);
+        if (ret < 0)
+            return ret;
+        if (ret == 1)
+            return 0; /* event consumed (coalesced or fully handled) */
+    }
+
+    /* Bitmap-to-text conversion via OCR (e.g. PGS -> ASS) */
+    if (ep->sub_dec) {
+        ret = dec_sub_process(ep->sub_dec, of, ost, sub, pkt);
+        if (ret < 0)
+            return ret;
+        if (ret == 1)
+            return 0; /* event consumed by OCR dedup buffer */
+    }
+
+    /* Bitmap subtitle codecs that set AV_CODEC_PROP_EXPLICIT_END need
+       two packets: one to display, one to clear at end time. */
+    needs_clear = av_subtitle_needs_clear(enc->codec_id) &&
+                  sub->num_rects > 0;
+    if (needs_clear)
         nb = 2;
     else if (enc->codec_id == AV_CODEC_ID_ASS)
         nb = FFMAX(sub->num_rects, 1);
@@ -456,7 +544,7 @@ static int do_subtitle_out(OutputFile *of, OutputStream *ost, const AVSubtitle *
         local_sub.end_display_time  -= sub->start_display_time;
         local_sub.start_display_time = 0;
 
-        if (enc->codec_id == AV_CODEC_ID_DVB_SUBTITLE && i == 1)
+        if (needs_clear && i == 1)
             local_sub.num_rects = 0;
         else if (enc->codec_id == AV_CODEC_ID_ASS && sub->num_rects > 0) {
             local_sub.num_rects = 1;
@@ -475,9 +563,7 @@ static int do_subtitle_out(OutputFile *of, OutputStream *ost, const AVSubtitle *
         pkt->time_base = AV_TIME_BASE_Q;
         pkt->pts       = sub->pts;
         pkt->duration = av_rescale_q(sub->end_display_time, (AVRational){ 1, 1000 }, pkt->time_base);
-        if (enc->codec_id == AV_CODEC_ID_DVB_SUBTITLE) {
-            /* XXX: the pts correction is handled here. Maybe handling
-               it in the codec would be better */
+        if (needs_clear) {
             if (i == 0)
                 pkt->pts += av_rescale_q(sub->start_display_time, (AVRational){ 1, 1000 }, pkt->time_base);
             else
@@ -830,12 +916,29 @@ static int frame_encode(OutputStream *ost, AVFrame *frame, AVPacket *pkt)
     enum AVMediaType type = ost->type;
 
     if (type == AVMEDIA_TYPE_SUBTITLE) {
-        const AVSubtitle *subtitle = frame && frame->buf[0] ?
-                                     (AVSubtitle*)frame->buf[0]->data : NULL;
+        AVSubtitle *subtitle = frame && frame->buf[0] ?
+                               (AVSubtitle*)frame->buf[0]->data : NULL;
 
-        // no flushing for subtitles
-        return subtitle && subtitle->num_rects ?
-               do_subtitle_out(of, ost, subtitle, pkt) : 0;
+        if (subtitle && subtitle->num_rects)
+            return do_subtitle_out(of, ost, subtitle, pkt);
+
+        /* End of stream: flush any pending buffered events */
+        {
+            EncoderPriv *ep = ep_from_enc(e);
+            int ret = 0;
+            if (ep->sub_dec) {
+                ret = dec_sub_flush(ep->sub_dec, of, ost, pkt,
+                                    AV_NOPTS_VALUE);
+                if (ret < 0)
+                    return ret;
+            }
+            if (ep->sub_enc) {
+                ret = enc_sub_flush(ep->sub_enc, of, ost, pkt);
+                if (ret < 0)
+                    return ret;
+            }
+        }
+        return 0;
     }
 
     if (frame) {
