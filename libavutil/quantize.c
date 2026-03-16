@@ -21,7 +21,9 @@
 #include <string.h>
 
 #include "common.h"
+#include "elbg.h"
 #include "error.h"
+#include "lfg.h"
 #include "mediancut.h"
 #include "mem.h"
 #include "neuquant.h"
@@ -43,6 +45,10 @@ struct AVQuantizeContext {
     int max_colors;
     FFNeuQuantContext *nq;
     AVPrivMedianCutContext *mc;
+    struct ELBGContext *elbg;
+    AVLFG elbg_lfg;
+    int *elbg_codebook;
+    int elbg_trained;
     QuantizeRegion regions[MAX_REGIONS];
     int nb_regions;
 };
@@ -77,6 +83,14 @@ AVQuantizeContext *av_quantize_alloc(enum AVQuantizeAlgorithm algorithm,
             return NULL;
         }
         break;
+    case AV_QUANTIZE_ELBG:
+        ctx->elbg_codebook = av_malloc_array(max_colors, 4 * sizeof(int));
+        if (!ctx->elbg_codebook) {
+            av_freep(&ctx);
+            return NULL;
+        }
+        av_lfg_init(&ctx->elbg_lfg, 1);
+        break;
     default:
         av_freep(&ctx);
         return NULL;
@@ -99,6 +113,8 @@ void av_quantize_freep(AVQuantizeContext **pctx)
         free_regions(ctx);
         ff_neuquant_free(&ctx->nq);
         avpriv_mediancut_free(&ctx->mc);
+        avpriv_elbg_free(&ctx->elbg);
+        av_freep(&ctx->elbg_codebook);
         av_freep(pctx);
     }
 }
@@ -159,6 +175,63 @@ static uint8_t *build_region_samples(const AVQuantizeContext *ctx,
 
     *out_total = pos;
     return buf;
+}
+
+/**
+ * Convert RGBA byte buffer to int point array for ELBG (4D).
+ */
+static int *rgba_to_int_points(const uint8_t *rgba, int nb_pixels)
+{
+    int *points = av_malloc_array(nb_pixels, 4 * sizeof(int));
+
+    if (!points)
+        return NULL;
+
+    for (int i = 0; i < nb_pixels; i++) {
+        const uint8_t *p = rgba + (size_t)i * 4;
+        points[i * 4    ] = p[0];
+        points[i * 4 + 1] = p[1];
+        points[i * 4 + 2] = p[2];
+        points[i * 4 + 3] = p[3];
+    }
+
+    return points;
+}
+
+static int run_elbg(AVQuantizeContext *ctx, const uint8_t *rgba,
+                     int nb_pixels, uint32_t *palette, int num_steps)
+{
+    int *points, *closest_cb;
+    int ret;
+
+    points = rgba_to_int_points(rgba, nb_pixels);
+    if (!points)
+        return AVERROR(ENOMEM);
+
+    closest_cb = av_malloc_array(nb_pixels, sizeof(int));
+    if (!closest_cb) {
+        av_free(points);
+        return AVERROR(ENOMEM);
+    }
+
+    ret = avpriv_elbg_do(&ctx->elbg, points, 4, nb_pixels,
+                          ctx->elbg_codebook, ctx->max_colors,
+                          num_steps, closest_cb, &ctx->elbg_lfg, 0);
+    av_free(points);
+    av_free(closest_cb);
+    if (ret < 0)
+        return ret;
+
+    for (int i = 0; i < ctx->max_colors; i++) {
+        const int *cb = ctx->elbg_codebook + i * 4;
+        palette[i] = ((uint32_t)av_clip_uintp2(cb[3], 8) << 24) |
+                     ((uint32_t)av_clip_uintp2(cb[0], 8) << 16) |
+                     ((uint32_t)av_clip_uintp2(cb[1], 8) <<  8) |
+                      (uint32_t)av_clip_uintp2(cb[2], 8);
+    }
+
+    ctx->elbg_trained = 1;
+    return 0;
 }
 
 int av_quantize_generate_palette(AVQuantizeContext *ctx,
@@ -240,6 +313,38 @@ int av_quantize_generate_palette(AVQuantizeContext *ctx,
         free_regions(ctx);
         return ret;
 
+    case AV_QUANTIZE_ELBG:
+        /* quality 1-10 -> 1 step, 11-20 -> 2 steps, 21-30 -> 3 steps */
+        {
+            int num_steps = 1 + (quality - 1) / 10;
+            if (ctx->nb_regions > 0) {
+                int max_px = 0, per_region, total;
+                uint8_t *samples;
+
+                for (int r = 0; r < ctx->nb_regions; r++)
+                    max_px = FFMAX(max_px, ctx->regions[r].nb_pixels);
+                per_region = FFMIN(max_px, SAMPLES_PER_REGION);
+
+                samples = build_region_samples(ctx, per_region, &total);
+                if (!samples) {
+                    free_regions(ctx);
+                    return AVERROR(ENOMEM);
+                }
+
+                ret = run_elbg(ctx, samples, total, palette, num_steps);
+                av_free(samples);
+                if (ret < 0) {
+                    free_regions(ctx);
+                    return ret;
+                }
+            } else {
+                ret = run_elbg(ctx, rgba, nb_pixels, palette, num_steps);
+                if (ret < 0)
+                    return ret;
+            }
+            free_regions(ctx);
+            return ctx->max_colors;
+        }
     }
 
     return AVERROR(EINVAL);
@@ -272,6 +377,27 @@ int av_quantize_apply(AVQuantizeContext *ctx,
         }
         return 0;
 
+    case AV_QUANTIZE_ELBG:
+        if (!ctx->elbg_trained)
+            return AVERROR(EINVAL);
+        for (int i = 0; i < nb_pixels; i++) {
+            const uint8_t *p = rgba + (size_t)i * 4;
+            int best = 0, best_dist = INT_MAX;
+            for (int j = 0; j < ctx->max_colors; j++) {
+                const int *cb = ctx->elbg_codebook + j * 4;
+                int dr = p[0] - cb[0];
+                int dg = p[1] - cb[1];
+                int db = p[2] - cb[2];
+                int da = p[3] - cb[3];
+                int dist = dr * dr + dg * dg + db * db + da * da;
+                if (dist < best_dist) {
+                    best_dist = dist;
+                    best = j;
+                }
+            }
+            indices[i] = best;
+        }
+        return 0;
     }
 
     return AVERROR(EINVAL);
