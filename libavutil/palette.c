@@ -19,7 +19,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "libavutil/common.h"
+#include "common.h"
 #include "palette.h"
 
 #define K ((1 << 16) - 1)
@@ -162,7 +162,7 @@ static int32_t cbrt01_int(int32_t x)
 
 static int64_t div_round64(int64_t a, int64_t b) { return (a^b)<0 ? (a-b/2)/b : (a+b/2)/b; }
 
-struct Lab ff_srgb_u8_to_oklab_int(uint32_t srgb)
+struct FFLabColor ff_srgb_u8_to_oklab_int(uint32_t srgb)
 {
     const int32_t r = (int32_t)srgb2linear[srgb >> 16 & 0xff];
     const int32_t g = (int32_t)srgb2linear[srgb >>  8 & 0xff];
@@ -177,7 +177,7 @@ struct Lab ff_srgb_u8_to_oklab_int(uint32_t srgb)
     const int32_t m_ = cbrt01_int(m);
     const int32_t s_ = cbrt01_int(s);
 
-    const struct Lab ret = {
+    const struct FFLabColor ret = {
         .L = div_round64( 13792LL*l_ +  52010LL*m_ -   267LL*s_, K),
         .a = div_round64(129628LL*l_ - 159158LL*m_ + 29530LL*s_, K),
         .b = div_round64(  1698LL*l_ +  51299LL*m_ - 52997LL*s_, K),
@@ -186,7 +186,7 @@ struct Lab ff_srgb_u8_to_oklab_int(uint32_t srgb)
     return ret;
 }
 
-uint32_t ff_oklab_int_to_srgb_u8(struct Lab c)
+uint32_t ff_oklab_int_to_srgb_u8(struct FFLabColor c)
 {
     const int64_t l_ = c.L + div_round64(25974LL * c.a, K) + div_round64(14143LL * c.b, K);
     const int64_t m_ = c.L + div_round64(-6918LL * c.a, K) + div_round64(-4185LL * c.b, K);
