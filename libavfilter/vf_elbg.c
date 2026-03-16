@@ -23,7 +23,7 @@
  * video quantizer filter based on ELBG
  */
 
-#include "libavcodec/elbg.h"
+#include "libavutil/elbg.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
