@@ -63,8 +63,8 @@
 #include "roqvideo.h"
 #include "bytestream.h"
 #include "codec_internal.h"
-#include "elbg.h"
 #include "encode.h"
+#include "libavutil/elbg.h"
 #include "mathops.h"
 
 #define CHROMA_BIAS 1
