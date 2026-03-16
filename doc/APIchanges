@@ -2,6 +2,10 @@ The last version increases of all libraries were on 2025-03-28
 
 API changes, most recent first:
 
+2026-03-xx - xxxxxxxxxx - lavc 62.30.100 - codec_desc.h
+  Add AV_CODEC_PROP_EXPLICIT_END.
+  Add av_subtitle_needs_clear().
+
 2026-03-14 - xxxxxxxxxx - lavu 60.29.100 - hwcontext_vulkan.h
   Deprecate AVVulkanDeviceContext.lock_queue and
   AVVulkanDeviceContext.unlock_queue without replacement.
