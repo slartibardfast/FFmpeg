@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "libavutil/macros.h"
 #include "libavutil/mem.h"
 #include "libavutil/quantize.h"
 
@@ -741,6 +742,204 @@ fail:
     return -1;
 }
 
+/* Test Median Cut basic quantization.
+ *
+ * Generate a simple image with 4 distinct color clusters and verify
+ * the palette contains entries close to all of them. */
+static int test_mediancut_basic(void)
+{
+    AVQuantizeContext *ctx;
+    uint32_t palette[16];
+    uint8_t indices[256];
+    uint8_t rgba[256 * 4];
+    int nc;
+
+    printf("test_mediancut_basic: ");
+
+    /* 4 clusters: red, green, blue, white (64 pixels each) */
+    for (int i = 0; i < 64; i++) {
+        uint8_t *p = rgba + i * 4;
+        p[0] = 255; p[1] = 0; p[2] = 0; p[3] = 255;
+    }
+    for (int i = 64; i < 128; i++) {
+        uint8_t *p = rgba + i * 4;
+        p[0] = 0; p[1] = 255; p[2] = 0; p[3] = 255;
+    }
+    for (int i = 128; i < 192; i++) {
+        uint8_t *p = rgba + i * 4;
+        p[0] = 0; p[1] = 0; p[2] = 255; p[3] = 255;
+    }
+    for (int i = 192; i < 256; i++) {
+        uint8_t *p = rgba + i * 4;
+        p[0] = 255; p[1] = 255; p[2] = 255; p[3] = 255;
+    }
+
+    ctx = av_quantize_alloc(AV_QUANTIZE_MEDIAN_CUT, 16);
+    if (!ctx) return -1;
+
+    nc = av_quantize_generate_palette(ctx, rgba, 256, palette, 10);
+    if (nc < 0) {
+        fprintf(stderr, "generate_palette failed: %d\n", nc);
+        av_quantize_freep(&ctx);
+        return -1;
+    }
+
+    /* Verify we can map pixels */
+    if (av_quantize_apply(ctx, rgba, indices, 256) < 0) {
+        fprintf(stderr, "apply failed\n");
+        av_quantize_freep(&ctx);
+        return -1;
+    }
+
+    /* Check that palette has red, green, blue, white entries */
+    {
+        int found_r = 0, found_g = 0, found_b = 0, found_w = 0;
+        for (int i = 0; i < nc; i++) {
+            uint8_t r = (palette[i] >> 16) & 0xff;
+            uint8_t g = (palette[i] >>  8) & 0xff;
+            uint8_t b =  palette[i]        & 0xff;
+            if (r > 200 && g < 50 && b < 50) found_r = 1;
+            if (r < 50 && g > 200 && b < 50) found_g = 1;
+            if (r < 50 && g < 50 && b > 200) found_b = 1;
+            if (r > 200 && g > 200 && b > 200) found_w = 1;
+        }
+        if (!found_r || !found_g || !found_b || !found_w) {
+            fprintf(stderr, "missing cluster: R=%d G=%d B=%d W=%d\n",
+                    found_r, found_g, found_b, found_w);
+            av_quantize_freep(&ctx);
+            return -1;
+        }
+    }
+
+    av_quantize_freep(&ctx);
+    printf("OK\n");
+    return 0;
+}
+
+/* Test Median Cut with region-weighted quantization. */
+static int test_mediancut_regions(void)
+{
+    AVQuantizeContext *ctx;
+    uint32_t palette[16];
+    uint8_t large[4000 * 4], small_buf[100 * 4];
+    int nc, ret;
+
+    printf("test_mediancut_regions: ");
+
+    /* Large region: all white */
+    for (int i = 0; i < 4000; i++) {
+        large[i * 4 + 0] = 255;
+        large[i * 4 + 1] = 255;
+        large[i * 4 + 2] = 255;
+        large[i * 4 + 3] = 255;
+    }
+    /* Small region: vivid red */
+    for (int i = 0; i < 100; i++) {
+        small_buf[i * 4 + 0] = 255;
+        small_buf[i * 4 + 1] = 0;
+        small_buf[i * 4 + 2] = 0;
+        small_buf[i * 4 + 3] = 255;
+    }
+
+    ctx = av_quantize_alloc(AV_QUANTIZE_MEDIAN_CUT, 16);
+    if (!ctx) return -1;
+
+    ret = av_quantize_add_region(ctx, large, 4000);
+    if (ret < 0) goto fail;
+    ret = av_quantize_add_region(ctx, small_buf, 100);
+    if (ret < 0) goto fail;
+
+    nc = av_quantize_generate_palette(ctx, NULL, 0, palette, 10);
+    if (nc < 0) goto fail;
+
+    /* Verify red is in the palette */
+    {
+        int found = 0;
+        for (int i = 0; i < nc; i++) {
+            uint8_t r = (palette[i] >> 16) & 0xff;
+            uint8_t g = (palette[i] >>  8) & 0xff;
+            uint8_t b =  palette[i]        & 0xff;
+            if (r > 200 && g < 80 && b < 80) found = 1;
+        }
+        if (!found) {
+            fprintf(stderr, "red not found in region-weighted palette\n");
+            goto fail;
+        }
+    }
+
+    av_quantize_freep(&ctx);
+    printf("OK\n");
+    return 0;
+
+fail:
+    av_quantize_freep(&ctx);
+    return -1;
+}
+
+/* Compare Median Cut vs NeuQuant on same input to verify both produce
+ * reasonable results.  We don't require identical output, just that
+ * both palettes cover the input color space adequately. */
+static int test_mediancut_vs_neuquant(void)
+{
+    AVQuantizeContext *ctx;
+    uint32_t pal_mc[16], pal_nq[16];
+    uint8_t rgba[1024 * 4];
+    int nc;
+
+    printf("test_mediancut_vs_neuquant: ");
+
+    /* Generate gradient: R varies, G/B fixed */
+    for (int i = 0; i < 1024; i++) {
+        rgba[i * 4 + 0] = (i * 255) / 1023;
+        rgba[i * 4 + 1] = 100;
+        rgba[i * 4 + 2] = 50;
+        rgba[i * 4 + 3] = 255;
+    }
+
+    /* Median Cut */
+    ctx = av_quantize_alloc(AV_QUANTIZE_MEDIAN_CUT, 16);
+    if (!ctx) return -1;
+    nc = av_quantize_generate_palette(ctx, rgba, 1024, pal_mc, 10);
+    av_quantize_freep(&ctx);
+    if (nc < 0) return -1;
+
+    /* NeuQuant */
+    ctx = av_quantize_alloc(AV_QUANTIZE_NEUQUANT, 16);
+    if (!ctx) return -1;
+    nc = av_quantize_generate_palette(ctx, rgba, 1024, pal_nq, 10);
+    av_quantize_freep(&ctx);
+    if (nc < 0) return -1;
+
+    /* Both should have entries spanning the red range (0..255) */
+    {
+        int mc_min = 255, mc_max = 0, nq_min = 255, nq_max = 0;
+        for (int i = 0; i < 16; i++) {
+            uint8_t r;
+            r = (pal_mc[i] >> 16) & 0xff;
+            mc_min = FFMIN(mc_min, r);
+            mc_max = FFMAX(mc_max, r);
+            r = (pal_nq[i] >> 16) & 0xff;
+            nq_min = FFMIN(nq_min, r);
+            nq_max = FFMAX(nq_max, r);
+        }
+        printf("mc_range=%d..%d nq_range=%d..%d ",
+               mc_min, mc_max, nq_min, nq_max);
+        if (mc_max - mc_min < 150) {
+            fprintf(stderr, "\nMedian Cut range too narrow: %d\n",
+                    mc_max - mc_min);
+            return -1;
+        }
+        if (nq_max - nq_min < 150) {
+            fprintf(stderr, "\nNeuQuant range too narrow: %d\n",
+                    nq_max - nq_min);
+            return -1;
+        }
+    }
+
+    printf("OK\n");
+    return 0;
+}
+
 int main(void)
 {
     int ret = 0;
@@ -754,6 +953,9 @@ int main(void)
     ret |= test_region_multi_diversity();
     ret |= test_region_single_equivalence();
     ret |= test_region_karaoke();
+    ret |= test_mediancut_basic();
+    ret |= test_mediancut_regions();
+    ret |= test_mediancut_vs_neuquant();
 
     return !!ret;
 }
