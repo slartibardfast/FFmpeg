@@ -6,7 +6,10 @@ API changes, most recent first:
   Add AV_CODEC_PROP_EXPLICIT_END.
   Add av_subtitle_needs_clear().
 
-2026-03-xx - xxxxxxxxxx - lavu 60.29.100 - quantize.h
+2026-03-xx - xxxxxxxxxx - lavu 60.30.100 - quantize.h
+  Add AV_QUANTIZE_ELBG.
+
+2026-03-xx - xxxxxxxxxx - lavu 60.33.100 - quantize.h
   Add AV_QUANTIZE_MEDIAN_CUT.
 
 2026-03-xx - xxxxxxxxxx - lavu 60.32.100 - quantize.h

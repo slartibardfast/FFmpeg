@@ -32,6 +32,7 @@
 #include "libavutil/colorspace.h"
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
+#include "libavutil/quantize.h"
 
 #define PGS_MAX_OBJECT_REFS 2
 
@@ -51,6 +52,7 @@ typedef struct PGSSubEncContext {
     AVClass *class;
     int composition_number;
     int frame_rate;
+    int quantize_method;
 
     /* epoch state */
     int epoch_active;
@@ -725,6 +727,19 @@ static const AVOption options[] = {
       "0x20=24, 0x30=25, 0x40=29.97, 0x60=50, 0x70=59.94)",
       OFFSET(frame_rate), AV_OPT_TYPE_INT,
       {.i64 = 0}, 0, 0x70, SE },
+    { "quantize_method", "color quantization algorithm for text-to-bitmap conversion",
+      OFFSET(quantize_method), AV_OPT_TYPE_INT,
+      {.i64 = AV_QUANTIZE_NEUQUANT}, 0, AV_QUANTIZE_NEUQUANT,
+      SE, .unit = "quantize_method" },
+        { "elbg",      "Enhanced LBG (Patane, Russo 2001)",
+          0, AV_OPT_TYPE_CONST, {.i64 = AV_QUANTIZE_ELBG},
+          0, 0, SE, .unit = "quantize_method" },
+        { "mediancut", "Median Cut (Heckbert 1982)",
+          0, AV_OPT_TYPE_CONST, {.i64 = AV_QUANTIZE_MEDIAN_CUT},
+          0, 0, SE, .unit = "quantize_method" },
+        { "neuquant",  "NeuQuant neural-net (Dekker 1994)",
+          0, AV_OPT_TYPE_CONST, {.i64 = AV_QUANTIZE_NEUQUANT},
+          0, 0, SE, .unit = "quantize_method" },
     { "ap_interval", "Acquisition Point interval in ms (0=disabled)",
       OFFSET(ap_interval), AV_OPT_TYPE_INT,
       {.i64 = 0}, 0, 60000, SE },
