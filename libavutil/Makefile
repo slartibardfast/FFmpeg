@@ -188,6 +188,7 @@ OBJS = adler32.o                                                        \
        slicethread.o                                                    \
        spherical.o                                                      \
        stereo3d.o                                                       \
+       sub_util.o                                                       \
        tdrdi.o                                                          \
        threadmessage.o                                                  \
        time.o                                                           \
