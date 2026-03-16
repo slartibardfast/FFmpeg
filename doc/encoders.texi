@@ -4794,4 +4794,43 @@ determined based on this value.
 Defaults to 2 for centiseconds.
 @end table
 
+@section pgssub
+
+This codec encodes HDMV Presentation Graphic Stream (PGS) bitmap
+subtitles, as used on Blu-ray discs and in MKV/SUP containers.
+Addresses FFmpeg ticket @url{https://trac.ffmpeg.org/ticket/6843, #6843}.
+
+The encoder accepts @code{SUBTITLE_BITMAP} input and produces compliant
+PGS Display Sets with composition state machine, palette animation,
+and decoder model compliance per HDMV patents.
+
+When used with the text-to-bitmap conversion pipeline (@code{--enable-libass}),
+text subtitles (SRT, ASS, WebVTT) are automatically rendered and quantized
+to bitmap format before encoding.
+
+@subsection Options
+
+@table @option
+@item frame_rate @var{integer}
+PGS frame rate code. Values: @code{0x10} (23.976, default), @code{0x20} (24),
+@code{0x30} (25), @code{0x40} (29.97), @code{0x60} (50), @code{0x70} (59.94).
+Set to 0 to auto-detect from the output stream frame rate.
+
+@item quantize_method @var{string}
+Color quantization algorithm for text-to-bitmap conversion.
+@table @samp
+@item neuquant
+NeuQuant neural-net quantizer (Dekker 1994). Default. Fast, good quality.
+@item mediancut
+Median Cut (Heckbert 1982). Deterministic, best for structured images.
+@item elbg
+Enhanced LBG (Patane, Russo 2001). Best for gradients, slower.
+@end table
+
+@item ap_interval @var{integer}
+Acquisition Point insertion interval in milliseconds. Acquisition Points
+are periodic full-state refresh Display Sets that enable seeking within
+long subtitle epochs. Set to 0 to disable (default).
+@end table
+
 @c man end SUBTITLES ENCODERS
