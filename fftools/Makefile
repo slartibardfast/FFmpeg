@@ -15,6 +15,7 @@ OBJS-ffmpeg +=                  \
     fftools/ffmpeg_dec.o        \
     fftools/ffmpeg_demux.o      \
     fftools/ffmpeg_enc.o        \
+    fftools/ffmpeg_enc_sub.o    \
     fftools/ffmpeg_filter.o     \
     fftools/ffmpeg_hw.o         \
     fftools/ffmpeg_mux.o        \
