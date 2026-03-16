@@ -51,6 +51,7 @@
 enum AVQuantizeAlgorithm {
     AV_QUANTIZE_NEUQUANT,    /**< NeuQuant neural-net quantizer (Dekker 1994) */
     AV_QUANTIZE_MEDIAN_CUT,  /**< Median Cut quantizer (Heckbert 1982) */
+    AV_QUANTIZE_ELBG,        /**< Enhanced LBG (Patane, Russo 2001) */
 };
 
 /**
