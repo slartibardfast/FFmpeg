@@ -24,5 +24,9 @@ FATE_GIF_ENC-$(call ENCDEC, GIF, FRAMECRC GIF, SCALE_FILTER PIPE_PROTOCOL) = $(F
 
 fate-gifenc: $(FATE_GIF_ENC-yes)
 
+FATE_GIF_ENC_RGBA-$(call FILTERFRAMECRC, RGBTESTSRC, GIF_ENCODER) += fate-gifenc-rgba
+fate-gifenc-rgba: CMD = framecrc -lavfi rgbtestsrc=s=32x32:d=0.3:r=10 -c:v gif
+
 FATE_SAMPLES_FFMPEG += $(FATE_GIF-yes) $(FATE_GIF_ENC-yes)
-fate-gif: $(FATE_GIF-yes) $(FATE_GIF_ENC-yes)
+FATE_FFMPEG += $(FATE_GIF_ENC_RGBA-yes)
+fate-gif: $(FATE_GIF-yes) $(FATE_GIF_ENC-yes) $(FATE_GIF_ENC_RGBA-yes)
