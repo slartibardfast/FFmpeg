@@ -19,15 +19,15 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef AVFILTER_PALETTE_H
-#define AVFILTER_PALETTE_H
+#ifndef AVUTIL_PALETTE_H
+#define AVUTIL_PALETTE_H
 
 #include <math.h>
 #include <stdint.h>
 
-#include "libavutil/attributes.h"
+#include "attributes.h"
 
-struct Lab {
+struct FFLabColor {
     int32_t L, a, b;
 };
 
@@ -41,17 +41,17 @@ uint8_t ff_linear_int_to_srgb_u8(int32_t x);
  * sRGB (non-linear) to OkLab conversion
  * @see https://bottosson.github.io/posts/oklab/
  */
-struct Lab ff_srgb_u8_to_oklab_int(uint32_t srgb);
+struct FFLabColor ff_srgb_u8_to_oklab_int(uint32_t srgb);
 
 /**
  * OkLab to sRGB (non-linear) conversion
  * @see https://bottosson.github.io/posts/oklab/
  */
-uint32_t ff_oklab_int_to_srgb_u8(struct Lab c);
+uint32_t ff_oklab_int_to_srgb_u8(struct FFLabColor c);
 
 /*
  * lowbias32 hashing from https://nullprogram.com/blog/2018/07/31/
  */
 uint32_t ff_lowbias32(uint32_t x);
 
-#endif /* AVFILTER_PALETTE_H */
+#endif /* AVUTIL_PALETTE_H */

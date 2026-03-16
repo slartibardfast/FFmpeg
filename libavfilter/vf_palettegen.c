@@ -29,10 +29,10 @@
 #include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/intreadwrite.h"
+#include "libavutil/palette.h"
 #include "avfilter.h"
 #include "filters.h"
 #include "formats.h"
-#include "palette.h"
 #include "video.h"
 
 /* Reference a color and how much it's used */
