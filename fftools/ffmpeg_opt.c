@@ -2096,6 +2096,20 @@ const OptionDef options[] = {
         { .off = OFFSET(canvas_sizes) },
         "set canvas size (WxH or abbreviation)", "size" },
 
+    /* subtitle OCR options (bitmap-to-text conversion) */
+    { "sub_ocr_lang", OPT_TYPE_STRING, OPT_SUBTITLE | OPT_PERSTREAM | OPT_OUTPUT | OPT_EXPERT,
+        { .off = OFFSET(sub_ocr_lang) },
+        "override OCR language (default: auto from stream metadata)", "language" },
+    { "sub_ocr_datapath", OPT_TYPE_STRING, OPT_SUBTITLE | OPT_PERSTREAM | OPT_OUTPUT | OPT_EXPERT,
+        { .off = OFFSET(sub_ocr_datapath) },
+        "path to Tesseract training data directory", "path" },
+    { "sub_ocr_pageseg_mode", OPT_TYPE_INT, OPT_SUBTITLE | OPT_PERSTREAM | OPT_OUTPUT | OPT_EXPERT,
+        { .off = OFFSET(sub_ocr_pageseg_mode) },
+        "Tesseract page segmentation mode (default 6: single block)", "mode" },
+    { "sub_ocr_min_duration", OPT_TYPE_INT, OPT_SUBTITLE | OPT_PERSTREAM | OPT_OUTPUT | OPT_EXPERT,
+        { .off = OFFSET(sub_ocr_min_duration) },
+        "discard OCR events shorter than this (ms, default 200)", "duration" },
+
     /* muxer options */
     { "muxdelay",   OPT_TYPE_FLOAT, OPT_EXPERT | OPT_OFFSET | OPT_OUTPUT,
         { .off = OFFSET(mux_max_delay) },
