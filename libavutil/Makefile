@@ -134,6 +134,7 @@ OBJS = adler32.o                                                        \
        display.o                                                        \
        dovi_meta.o                                                      \
        downmix_info.o                                                   \
+       elbg.o                                                           \
        encryption_info.o                                                \
        error.o                                                          \
        eval.o                                                           \
