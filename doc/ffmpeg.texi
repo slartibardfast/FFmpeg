@@ -2161,6 +2161,29 @@ lot.
 @item -canvas_size @var{size}
 Set the size of the canvas used to render subtitles.
 
+@item -sub_ocr_lang @var{language}
+Set the Tesseract language code for bitmap-to-text OCR conversion
+(e.g. @code{eng}, @code{jpn}, @code{fra}). Defaults to auto-detection
+from the input stream language metadata, falling back to @code{eng}.
+Requires @code{--enable-libtesseract}.
+
+@item -sub_ocr_datapath @var{path}
+Set the path to the Tesseract training data directory. If not specified,
+Tesseract uses its default search path. Place @code{.traineddata} files
+for additional languages in a @code{tessdata/} directory next to the
+binary or at this path.
+
+@item -sub_ocr_pageseg_mode @var{integer}
+Set the Tesseract page segmentation mode. Default uses PSM 6 (uniform
+text block) with automatic fallback to PSM 7 (single line) for RTL
+and complex scripts. Override with a specific PSM value (0-13) if
+the default produces poor results.
+
+@item -sub_ocr_min_duration @var{integer}
+Set the minimum subtitle duration in milliseconds for OCR output.
+Events shorter than this after bitmap deduplication are discarded.
+Default is 200ms, which filters stray PGS fade frames (~42ms each).
+
 @end table
 
 @section Advanced options
