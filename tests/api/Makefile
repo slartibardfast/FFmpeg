@@ -3,7 +3,7 @@ APITESTPROGS-$(call DEMDEC, H264, H264) += api-h264
 APITESTPROGS-$(call DEMDEC, H264, H264) += api-h264-slice
 APITESTPROGS-yes += api-seek api-dump-stream-meta
 APITESTPROGS-$(call DEMDEC, H263, H263) += api-band
-APITESTPROGS-$(CONFIG_PGSSUB_ENCODER) += api-pgs-fade api-pgs-animation-util api-pgs-animation-timing api-pgs-coalesce api-pgs-rectsplit api-pgs-dts api-pgs-palette-delta api-pgs-overlap-verify api-pgs-palette-reuse api-pgs-multi-object
+APITESTPROGS-$(CONFIG_PGSSUB_ENCODER) += api-pgs-fade api-pgs-animation-util api-pgs-animation-timing api-pgs-coalesce api-pgs-rectsplit api-pgs-dts api-pgs-palette-delta api-pgs-overlap-verify api-pgs-palette-reuse api-pgs-multi-object api-pgs-ap-interval
 APITESTPROGS-$(HAVE_THREADS) += api-threadmessage
 APITESTPROGS += $(APITESTPROGS-yes)
 
