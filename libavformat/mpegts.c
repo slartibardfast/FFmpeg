@@ -2159,7 +2159,7 @@ int ff_parse_mpeg2_descriptor(AVFormatContext *fc, AVStream *st, int stream_type
                     language[i * 4 + 2] = get8(pp, desc_end);
                     language[i * 4 + 3] = ',';
 
-                    /* hearing impaired subtitles detection using subtitling_type */
+                    /* subtitle type detection using subtitling_type (EN 300 468) */
                     switch (*pp[0]) {
                     case 0x20: /* DVB subtitles (for the hard of hearing) with no monitor aspect ratio criticality */
                     case 0x21: /* DVB subtitles (for the hard of hearing) for display on 4:3 aspect ratio monitor */
@@ -2168,6 +2168,14 @@ int ff_parse_mpeg2_descriptor(AVFormatContext *fc, AVStream *st, int stream_type
                     case 0x24: /* DVB subtitles (for the hard of hearing) for display on a high definition monitor */
                     case 0x25: /* DVB subtitles (for the hard of hearing) with plano-stereoscopic disparity for display on a high definition monitor */
                         st->disposition |= AV_DISPOSITION_HEARING_IMPAIRED;
+                        break;
+                    case 0x30: /* DVB subtitles (open/forced) with no monitor aspect ratio criticality */
+                    case 0x31: /* DVB subtitles (open/forced) for display on 4:3 aspect ratio monitor */
+                    case 0x32: /* DVB subtitles (open/forced) for display on 16:9 aspect ratio monitor */
+                    case 0x33: /* DVB subtitles (open/forced) for display on 2.21:1 aspect ratio monitor */
+                    case 0x34: /* DVB subtitles (open/forced) for display on a high definition monitor */
+                    case 0x35: /* DVB subtitles (open/forced) with plano-stereoscopic disparity for display on a high definition monitor */
+                        st->disposition |= AV_DISPOSITION_FORCED;
                         break;
                     }
 

@@ -748,10 +748,12 @@ static int mpegts_write_pmt(AVFormatContext *s, MpegTSService *service)
                        extradata_copied += 5;
                        q += 4;
                    } else {
-                       /* subtitling_type:
+                       /* subtitling_type per EN 300 468:
                         * 0x10 - normal with no monitor aspect ratio criticality
-                        * 0x20 - for the hard of hearing with no monitor aspect ratio criticality */
-                       *q++ = (st->disposition & AV_DISPOSITION_HEARING_IMPAIRED) ? 0x20 : 0x10;
+                        * 0x20 - for the hard of hearing with no monitor aspect ratio criticality
+                        * 0x30 - open/forced with no monitor aspect ratio criticality */
+                       *q++ = (st->disposition & AV_DISPOSITION_FORCED)          ? 0x30 :
+                              (st->disposition & AV_DISPOSITION_HEARING_IMPAIRED) ? 0x20 : 0x10;
                        if ((st->codecpar->extradata_size == 4) && (extradata_copied == 0)) {
                            /* support of old 4-byte extradata format */
                            memcpy(q, st->codecpar->extradata, 4); /* composition_page_id and ancillary_page_id */
