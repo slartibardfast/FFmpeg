@@ -1562,6 +1562,24 @@ static int ost_add(Muxer *mux, const OptionsContext *o, enum AVMediaType type,
                              &ost->sub_ocr_pageseg_mode);
     opt_match_per_stream_int(ost, &o->sub_ocr_min_duration, oc, st,
                              &ost->sub_ocr_min_duration);
+    {
+        const char *fsf = NULL;
+        opt_match_per_stream_str(ost, &o->forced_subs_filter, oc, st, &fsf);
+        if (fsf) {
+            if (!strcmp(fsf, "forced"))
+                ost->forced_subs_filter = SUB_FORCED_ONLY;
+            else if (!strcmp(fsf, "non_forced"))
+                ost->forced_subs_filter = SUB_NON_FORCED_ONLY;
+            else if (!strcmp(fsf, "all"))
+                ost->forced_subs_filter = SUB_FORCED_ALL;
+            else {
+                av_log(ost, AV_LOG_ERROR,
+                       "Invalid forced_subs_filter '%s' "
+                       "(use all, forced, or non_forced)\n", fsf);
+                return AVERROR(EINVAL);
+            }
+        }
+    }
 
     if (oc->oformat->flags & AVFMT_GLOBALHEADER && ost->enc)
         ost->enc->enc_ctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;

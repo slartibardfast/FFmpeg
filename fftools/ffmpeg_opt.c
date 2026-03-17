@@ -2109,6 +2109,9 @@ const OptionDef options[] = {
     { "sub_ocr_min_duration", OPT_TYPE_INT, OPT_SUBTITLE | OPT_PERSTREAM | OPT_OUTPUT | OPT_EXPERT,
         { .off = OFFSET(sub_ocr_min_duration) },
         "discard OCR events shorter than this (ms, default 200)", "duration" },
+    { "forced_subs_filter", OPT_TYPE_STRING, OPT_SUBTITLE | OPT_PERSTREAM | OPT_OUTPUT,
+        { .off = OFFSET(forced_subs_filter) },
+        "filter subtitle events by forced flag (all, forced, non_forced)", "mode" },
 
     /* muxer options */
     { "muxdelay",   OPT_TYPE_FLOAT, OPT_EXPERT | OPT_OFFSET | OPT_OUTPUT,

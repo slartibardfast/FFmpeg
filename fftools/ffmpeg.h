@@ -242,6 +242,7 @@ typedef struct OptionsContext {
     SpecifierOptList sub_ocr_datapath;
     SpecifierOptList sub_ocr_pageseg_mode;
     SpecifierOptList sub_ocr_min_duration;
+    SpecifierOptList forced_subs_filter;
     SpecifierOptList pass;
     SpecifierOptList passlogfiles;
     SpecifierOptList max_muxing_queue_size;
@@ -708,6 +709,12 @@ typedef struct OutputStream {
     char *sub_ocr_datapath;
     int         sub_ocr_pageseg_mode;
     int         sub_ocr_min_duration;
+
+    /* forced subtitle filter: 0=all (default), 1=forced only, 2=non-forced only */
+#define SUB_FORCED_ALL       0
+#define SUB_FORCED_ONLY      1
+#define SUB_NON_FORCED_ONLY  2
+    int         forced_subs_filter;
 } OutputStream;
 
 typedef struct OutputFile {
