@@ -4836,6 +4836,13 @@ long subtitle epochs. Set to 0 to disable (default).
 Mark all subtitle events as forced. Forced subtitles display even when
 the user has subtitle display disabled, used for foreign-language dialogue,
 signs, and on-screen text. Default is false.
+
+@item max_cdb_usage @var{float}
+Maximum coded data buffer usage threshold (0.0 to 1.0). When set above
+zero, the encoder estimates whether each Display Set would overflow the
+HDMV coded data buffer (1 MB at 16 Mbps) and drops events that would
+exceed this threshold. Set to 0 to disable (default). A value of 0.9
+allows 90% buffer utilisation before dropping events.
 @end table
 
 @c man end SUBTITLES ENCODERS

@@ -81,6 +81,7 @@ typedef struct PGSSubEncContext {
     int64_t last_ap_pts;      /* PTS of last Acquisition Point */
     int     ap_interval;      /* Acquisition Point interval (ms), 0=off */
     int     force_all;        /* mark all events as forced */
+    double  max_cdb_usage;    /* CDB usage threshold (0.0-1.0), 0=disabled */
 } PGSSubEncContext;
 
 /**
@@ -681,6 +682,31 @@ static int pgssub_encode(AVCodecContext *avctx, uint8_t *outbuf,
             state = PGS_ACQUISITION;
     }
 
+    /* CDB rate control: estimate if this display set would overflow
+     * the coded data buffer. If so, drop with warning. */
+    if (s->max_cdb_usage > 0.0 && rects &&
+        s->last_pts != AV_NOPTS_VALUE && h->pts != AV_NOPTS_VALUE) {
+        int64_t headroom = s->cdb_fill;
+        int64_t est_size = 14 + 8 * rects;  /* PCS */
+        if (h->pts > s->last_pts) {
+            int64_t refill = (h->pts - s->last_pts) * PGS_RX / PGS_FREQ;
+            headroom = FFMIN(headroom + refill, PGS_CDB_SIZE);
+        }
+        est_size += 4 + 9 * rects;          /* WDS */
+        est_size += 1282;                    /* PDS worst case */
+        for (i = 0; i < rects; i++)          /* ODS per rect */
+            est_size += 11 + (int64_t)h->rects[i]->w * h->rects[i]->h;
+        est_size += 3;                       /* END */
+        if (est_size > headroom * s->max_cdb_usage) {
+            av_log(avctx, AV_LOG_WARNING,
+                   "PGS rate control: dropping display set "
+                   "(estimated %"PRId64" bytes, CDB headroom "
+                   "%"PRId64" bytes, threshold %.0f%%)\n",
+                   est_size, headroom, s->max_cdb_usage * 100);
+            return 0;
+        }
+    }
+
     s->decode_duration = pgs_compute_decode_duration(avctx, h, state);
     av_log(avctx, AV_LOG_DEBUG,
            "PGS display set: state=%s decode_duration=%"PRId64
@@ -780,6 +806,11 @@ static const AVOption options[] = {
     { "force_all", "Mark all subtitle events as forced",
       OFFSET(force_all), AV_OPT_TYPE_BOOL,
       {.i64 = 0}, 0, 1, SE },
+    { "max_cdb_usage", "Maximum coded data buffer usage (0.0-1.0, "
+      "0=disabled). Events exceeding this threshold are dropped with "
+      "a warning to maintain decoder model compliance.",
+      OFFSET(max_cdb_usage), AV_OPT_TYPE_DOUBLE,
+      {.dbl = 0.0}, 0.0, 1.0, SE },
     { NULL },
 };
 
