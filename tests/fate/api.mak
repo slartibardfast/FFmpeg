@@ -41,6 +41,21 @@ fate-api-pgs-rectsplit: $(APITESTSDIR)/api-pgs-rectsplit-test$(EXESUF)
 fate-api-pgs-rectsplit: CMD = run $(APITESTSDIR)/api-pgs-rectsplit-test$(EXESUF)
 fate-api-pgs-rectsplit: CMP = null
 
+FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-dts
+fate-api-pgs-dts: $(APITESTSDIR)/api-pgs-dts-test$(EXESUF)
+fate-api-pgs-dts: CMD = run $(APITESTSDIR)/api-pgs-dts-test$(EXESUF)
+fate-api-pgs-dts: CMP = null
+
+FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-palette-delta
+fate-api-pgs-palette-delta: $(APITESTSDIR)/api-pgs-palette-delta-test$(EXESUF)
+fate-api-pgs-palette-delta: CMD = run $(APITESTSDIR)/api-pgs-palette-delta-test$(EXESUF)
+fate-api-pgs-palette-delta: CMP = null
+
+FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-overlap-verify
+fate-api-pgs-overlap-verify: $(APITESTSDIR)/api-pgs-overlap-verify-test$(EXESUF)
+fate-api-pgs-overlap-verify: CMD = run $(APITESTSDIR)/api-pgs-overlap-verify-test$(EXESUF)
+fate-api-pgs-overlap-verify: CMP = null
+
 FATE_API_LIBAVFORMAT-yes += $(if $(findstring fate-lavf-flv,$(FATE_LAVF_CONTAINER)),fate-api-seek)
 fate-api-seek: $(APITESTSDIR)/api-seek-test$(EXESUF) fate-lavf-flv
 fate-lavf-flv: KEEP_FILES ?= 1

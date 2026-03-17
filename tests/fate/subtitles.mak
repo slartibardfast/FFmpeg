@@ -65,6 +65,14 @@ FATE_SUBTITLES-$(call FRAMECRC, SUP, PGSSUB, PGSSUB_ENCODER) += fate-sub-pgs
 fate-sub-pgs: CMD = framecrc -i $(TARGET_SAMPLES)/sub/pgs_sub.sup -map s:0 -c pgssub
 
 # OCR roundtrip test (no external samples needed)
+# Overlapping SRT events encoded to PGS (no external samples needed)
+FATE_SUBTITLES_OVERLAP-$(call ALLYES, SRT_DEMUXER SUBRIP_DECODER PGSSUB_ENCODER \
+    LIBASS FRAMECRC_MUXER PIPE_PROTOCOL) += fate-sub-pgs-overlap
+fate-sub-pgs-overlap: CMD = framecrc -i $(SRC_PATH)/tests/data/sub-overlap-test.srt \
+    -map 0:s -c:s pgssub -s 1920x1080
+FATE_FFMPEG += $(FATE_SUBTITLES_OVERLAP-yes)
+fate-subtitles: $(FATE_SUBTITLES_OVERLAP-yes)
+
 FATE_SUBTITLES_OCR-$(call ALLYES, SRT_DEMUXER SUBRIP_DECODER PGSSUB_ENCODER \
     SUBRIP_ENCODER LIBASS LIBTESSERACT SUP_MUXER SUP_DEMUXER PGSSUB_DECODER) \
     += fate-sub-ocr-roundtrip
