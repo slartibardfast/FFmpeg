@@ -31,6 +31,11 @@ fate-api-pgs-palette-delta: $(APITESTSDIR)/api-pgs-palette-delta-test$(EXESUF)
 fate-api-pgs-palette-delta: CMD = run $(APITESTSDIR)/api-pgs-palette-delta-test$(EXESUF)
 fate-api-pgs-palette-delta: CMP = null
 
+FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-palette-reuse
+fate-api-pgs-palette-reuse: $(APITESTSDIR)/api-pgs-palette-reuse-test$(EXESUF)
+fate-api-pgs-palette-reuse: CMD = run $(APITESTSDIR)/api-pgs-palette-reuse-test$(EXESUF)
+fate-api-pgs-palette-reuse: CMP = null
+
 FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-overlap-verify
 fate-api-pgs-overlap-verify: $(APITESTSDIR)/api-pgs-overlap-verify-test$(EXESUF)
 fate-api-pgs-overlap-verify: CMD = run $(APITESTSDIR)/api-pgs-overlap-verify-test$(EXESUF)
