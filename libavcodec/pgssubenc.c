@@ -80,6 +80,7 @@ typedef struct PGSSubEncContext {
     int64_t dob_used;         /* Decoded Object Buffer usage (bytes) */
     int64_t last_ap_pts;      /* PTS of last Acquisition Point */
     int     ap_interval;      /* Acquisition Point interval (ms), 0=off */
+    int     force_all;        /* mark all events as forced */
 } PGSSubEncContext;
 
 /**
@@ -289,7 +290,8 @@ static int pgs_write_pcs(uint8_t **pq, const uint8_t *buf_end,
     for (i = 0; i < rects; i++) {
         bytestream_put_be16(&q, i);
         *q++ = i;
-        *q++ = (h->rects[i]->flags & AV_SUBTITLE_FLAG_FORCED)
+        *q++ = (s->force_all ||
+                (h->rects[i]->flags & AV_SUBTITLE_FLAG_FORCED))
                ? 0x40 : 0x00;
         bytestream_put_be16(&q, h->rects[i]->x);
         bytestream_put_be16(&q, h->rects[i]->y);
@@ -775,6 +777,9 @@ static const AVOption options[] = {
     { "ap_interval", "Acquisition Point interval in ms (0=disabled)",
       OFFSET(ap_interval), AV_OPT_TYPE_INT,
       {.i64 = 0}, 0, 60000, SE },
+    { "force_all", "Mark all subtitle events as forced",
+      OFFSET(force_all), AV_OPT_TYPE_BOOL,
+      {.i64 = 0}, 0, 1, SE },
     { NULL },
 };
 
