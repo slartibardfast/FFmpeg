@@ -4831,6 +4831,11 @@ Enhanced LBG (Patane, Russo 2001). Best for gradients, slower.
 Acquisition Point insertion interval in milliseconds. Acquisition Points
 are periodic full-state refresh Display Sets that enable seeking within
 long subtitle epochs. Set to 0 to disable (default).
+
+@item force_all @var{boolean}
+Mark all subtitle events as forced. Forced subtitles display even when
+the user has subtitle display disabled, used for foreign-language dialogue,
+signs, and on-screen text. Default is false.
 @end table
 
 @c man end SUBTITLES ENCODERS
