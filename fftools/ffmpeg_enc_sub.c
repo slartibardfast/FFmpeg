@@ -304,6 +304,21 @@ static int encode_subtitle_packet(SubtitleEncContext *ctx,
             ost->st->disposition |= AV_DISPOSITION_FORCED;
     }
 
+    /* Filter rects by forced flag if -forced_subs_filter is set */
+    if (ost->forced_subs_filter && sub->num_rects > 0) {
+        int want = (ost->forced_subs_filter == SUB_FORCED_ONLY);
+        int j = 0;
+        for (int i = 0; i < sub->num_rects; i++) {
+            int is_forced = !!(sub->rects[i]->flags &
+                               AV_SUBTITLE_FLAG_FORCED);
+            if (is_forced == want)
+                sub->rects[j++] = sub->rects[i];
+        }
+        if (j == 0)
+            return 0;  /* no matching rects — skip event */
+        sub->num_rects = j;
+    }
+
     ret = av_new_packet(pkt, subtitle_out_max_size);
     if (ret < 0)
         return AVERROR(ENOMEM);
