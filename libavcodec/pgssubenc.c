@@ -67,6 +67,11 @@ typedef struct PGSSubEncContext {
     uint32_t prev_palette[AVPALETTE_COUNT];
     int prev_nb_colors;
 
+    /* PDS delta: cached YCbCrA values for palette delta encoding.
+     * Only changed entries are written in Normal Display Sets. */
+    uint8_t  pds_cache[AVPALETTE_COUNT][4]; /* [Y, Cr, Cb, A] per entry */
+    int      pds_cache_valid;               /* 0 until first Epoch Start */
+
     /* decoder model (Phase 8) */
     int obj_version[PGS_MAX_OBJECT_REFS];
     int64_t decode_duration;  /* last decode duration (90kHz ticks) */
@@ -323,11 +328,12 @@ static int pgs_write_wds(uint8_t **pq, const uint8_t *buf_end,
 
 static int pgs_write_pds(uint8_t **pq, const uint8_t *buf_end,
                           const AVSubtitle *h, PGSSubEncContext *s,
-                          int bt709)
+                          int bt709, int full_palette)
 {
     uint8_t *q = *pq, *pseg_len;
     const uint32_t *pal;
     int i, nc;
+    uint8_t entry[4]; /* Y, Cr, Cb, A */
 
     pal = (const uint32_t *)h->rects[0]->data[1];
     nc = FFMIN(h->rects[0]->nb_colors, AVPALETTE_COUNT);
@@ -346,26 +352,51 @@ static int pgs_write_pds(uint8_t **pq, const uint8_t *buf_end,
         int a = (c >> 24) & 0xff;
         int r, g, b;
 
+        if (!a) {
+            entry[0] = entry[1] = entry[2] = entry[3] = 0;
+        } else {
+            r = (c >> 16) & 0xff;
+            g = (c >>  8) & 0xff;
+            b =  c        & 0xff;
+            if (bt709) {
+                entry[0] = RGB_TO_Y_BT709(r, g, b);
+                entry[1] = RGB_TO_V_BT709(r, g, b, 0);
+                entry[2] = RGB_TO_U_BT709(r, g, b, 0);
+            } else {
+                entry[0] = RGB_TO_Y_CCIR(r, g, b);
+                entry[1] = RGB_TO_V_CCIR(r, g, b, 0);
+                entry[2] = RGB_TO_U_CCIR(r, g, b, 0);
+            }
+            entry[3] = a;
+        }
+
+        /* Delta: skip entries unchanged from previous PDS */
+        if (!full_palette && s->pds_cache_valid &&
+            !memcmp(entry, s->pds_cache[i], 4))
+            continue;
+
+        /* Skip fully transparent entries */
         if (!a)
             continue;
 
-        r = (c >> 16) & 0xff;
-        g = (c >>  8) & 0xff;
-        b =  c        & 0xff;
-
         *q++ = i;
-        if (bt709) {
-            *q++ = RGB_TO_Y_BT709(r, g, b);
-            *q++ = RGB_TO_V_BT709(r, g, b, 0);
-            *q++ = RGB_TO_U_BT709(r, g, b, 0);
-        } else {
-            *q++ = RGB_TO_Y_CCIR(r, g, b);
-            *q++ = RGB_TO_V_CCIR(r, g, b, 0);
-            *q++ = RGB_TO_U_CCIR(r, g, b, 0);
-        }
-        *q++ = a;
+        *q++ = entry[0];
+        *q++ = entry[1];
+        *q++ = entry[2];
+        *q++ = entry[3];
+
+        /* Update cache */
+        memcpy(s->pds_cache[i], entry, 4);
     }
     bytestream_put_be16(&pseg_len, q - pseg_len - 2);
+
+    if (full_palette) {
+        /* Zero out cache entries beyond nc so that new entries
+         * in later frames are detected as changed. */
+        for (i = nc; i < AVPALETTE_COUNT; i++)
+            memset(s->pds_cache[i], 0, 4);
+        s->pds_cache_valid = 1;
+    }
 
     *pq = q;
     return 0;
@@ -661,6 +692,7 @@ static int pgssub_encode(AVCodecContext *avctx, uint8_t *outbuf,
      * reflects the new version number. Cache is updated after writing. */
     if (state == PGS_EPOCH_START) {
         s->palette_version = 0;
+        s->pds_cache_valid = 0;
         for (i = 0; i < PGS_MAX_OBJECT_REFS; i++)
             s->obj_version[i] = 0;
     } else if (palette_update)
@@ -676,7 +708,7 @@ static int pgssub_encode(AVCodecContext *avctx, uint8_t *outbuf,
         ret = pgs_write_wds(&q, buf_end, h);
         if (ret < 0)
             return ret;
-        ret = pgs_write_pds(&q, buf_end, h, s, bt709);
+        ret = pgs_write_pds(&q, buf_end, h, s, bt709, 1);
         if (ret < 0)
             return ret;
         for (i = 0; i < rects; i++) {
@@ -687,8 +719,8 @@ static int pgssub_encode(AVCodecContext *avctx, uint8_t *outbuf,
             s->obj_version[i] = (s->obj_version[i] + 1) & 0xff;
         }
     } else if (rects && palette_update) {
-        /* palette-only update: PDS only (no WDS, no ODS) */
-        ret = pgs_write_pds(&q, buf_end, h, s, bt709);
+        /* palette-only update: delta PDS (only changed entries) */
+        ret = pgs_write_pds(&q, buf_end, h, s, bt709, 0);
         if (ret < 0)
             return ret;
     }
@@ -729,7 +761,7 @@ static const AVOption options[] = {
       {.i64 = 0}, 0, 0x70, SE },
     { "quantize_method", "color quantization algorithm for text-to-bitmap conversion",
       OFFSET(quantize_method), AV_OPT_TYPE_INT,
-      {.i64 = AV_QUANTIZE_NEUQUANT}, 0, AV_QUANTIZE_NEUQUANT,
+      {.i64 = AV_QUANTIZE_NEUQUANT}, 0, AV_QUANTIZE_ELBG,
       SE, .unit = "quantize_method" },
         { "elbg",      "Enhanced LBG (Patane, Russo 2001)",
           0, AV_OPT_TYPE_CONST, {.i64 = AV_QUANTIZE_ELBG},

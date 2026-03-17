@@ -686,7 +686,7 @@ static const AVOption gif_options[] = {
     { "quantize_method", "color quantization algorithm for RGBA input",
       OFFSET(quantize_method), AV_OPT_TYPE_INT,
       {.i64 = AV_QUANTIZE_MEDIAN_CUT}, 0,
-      AV_QUANTIZE_NEUQUANT, FLAGS, .unit = "quantize_method" },
+      AV_QUANTIZE_ELBG, FLAGS, .unit = "quantize_method" },
         { "elbg",      "Enhanced LBG (Patane, Russo 2001)",
           0, AV_OPT_TYPE_CONST, {.i64 = AV_QUANTIZE_ELBG},
           0, 0, FLAGS, .unit = "quantize_method" },
