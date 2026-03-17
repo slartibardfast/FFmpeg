@@ -285,6 +285,25 @@ static int encode_subtitle_packet(SubtitleEncContext *ctx,
     int subtitle_out_max_size = 1024 * 1024;
     int subtitle_out_size, ret;
 
+    /* Propagate stream-level forced disposition to per-rect flags.
+     * This bridges container metadata (MKV FlagForced, DVD forced track,
+     * user -disposition:s forced) into the subtitle content layer. */
+    if (sub->num_rects > 0 &&
+        ost->ist && ost->ist->st->disposition & AV_DISPOSITION_FORCED) {
+        for (int i = 0; i < sub->num_rects; i++)
+            sub->rects[i]->flags |= AV_SUBTITLE_FLAG_FORCED;
+    }
+
+    /* Propagate encoder force_all option to output stream disposition.
+     * This ensures container metadata (MKV FlagForced, MPEG-TS
+     * subtitling_type) is set when encoding a forced subtitle track. */
+    if (!(ost->st->disposition & AV_DISPOSITION_FORCED)) {
+        int64_t force_all = 0;
+        if (av_opt_get_int(enc->priv_data, "force_all", 0,
+                           &force_all) >= 0 && force_all)
+            ost->st->disposition |= AV_DISPOSITION_FORCED;
+    }
+
     ret = av_new_packet(pkt, subtitle_out_max_size);
     if (ret < 0)
         return AVERROR(ENOMEM);
