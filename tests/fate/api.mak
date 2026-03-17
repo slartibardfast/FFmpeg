@@ -56,6 +56,11 @@ fate-api-pgs-palette-reuse: $(APITESTSDIR)/api-pgs-palette-reuse-test$(EXESUF)
 fate-api-pgs-palette-reuse: CMD = run $(APITESTSDIR)/api-pgs-palette-reuse-test$(EXESUF)
 fate-api-pgs-palette-reuse: CMP = null
 
+FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-multi-object
+fate-api-pgs-multi-object: $(APITESTSDIR)/api-pgs-multi-object-test$(EXESUF)
+fate-api-pgs-multi-object: CMD = run $(APITESTSDIR)/api-pgs-multi-object-test$(EXESUF)
+fate-api-pgs-multi-object: CMP = null
+
 FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-overlap-verify
 fate-api-pgs-overlap-verify: $(APITESTSDIR)/api-pgs-overlap-verify-test$(EXESUF)
 fate-api-pgs-overlap-verify: CMD = run $(APITESTSDIR)/api-pgs-overlap-verify-test$(EXESUF)
