@@ -61,6 +61,11 @@ fate-api-pgs-ap-interval: $(APITESTSDIR)/api-pgs-ap-interval-test$(EXESUF)
 fate-api-pgs-ap-interval: CMD = run $(APITESTSDIR)/api-pgs-ap-interval-test$(EXESUF)
 fate-api-pgs-ap-interval: CMP = null
 
+FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-rate-control
+fate-api-pgs-rate-control: $(APITESTSDIR)/api-pgs-rate-control-test$(EXESUF)
+fate-api-pgs-rate-control: CMD = run $(APITESTSDIR)/api-pgs-rate-control-test$(EXESUF)
+fate-api-pgs-rate-control: CMP = null
+
 FATE_API_LIBAVCODEC-$(CONFIG_PGSSUB_ENCODER) += fate-api-pgs-forced
 fate-api-pgs-forced: $(APITESTSDIR)/api-pgs-forced-test$(EXESUF)
 fate-api-pgs-forced: CMD = run $(APITESTSDIR)/api-pgs-forced-test$(EXESUF)

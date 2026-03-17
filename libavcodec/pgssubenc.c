@@ -81,6 +81,8 @@ typedef struct PGSSubEncContext {
     int64_t last_ap_pts;      /* PTS of last Acquisition Point */
     int     ap_interval;      /* Acquisition Point interval (ms), 0=off */
     int     force_all;        /* mark all events as forced */
+    double  max_cdb_usage;    /* CDB usage threshold (0.0-1.0), 0=disabled */
+    char   *forced_style;     /* comma-separated ASS style names to mark forced */
 } PGSSubEncContext;
 
 /**
@@ -681,6 +683,31 @@ static int pgssub_encode(AVCodecContext *avctx, uint8_t *outbuf,
             state = PGS_ACQUISITION;
     }
 
+    /* CDB rate control: estimate if this display set would overflow
+     * the coded data buffer. If so, drop with warning. */
+    if (s->max_cdb_usage > 0.0 && rects &&
+        s->last_pts != AV_NOPTS_VALUE && h->pts != AV_NOPTS_VALUE) {
+        int64_t headroom = s->cdb_fill;
+        int64_t est_size = 3 + 11 + 8 * rects; /* PCS: hdr + payload */
+        if (h->pts > s->last_pts) {
+            int64_t refill = (h->pts - s->last_pts) * PGS_RX / PGS_FREQ;
+            headroom = FFMIN(headroom + refill, PGS_CDB_SIZE);
+        }
+        est_size += 3 + 1 + 9 * rects;       /* WDS: hdr + payload */
+        est_size += 3 + 2 + 256 * 5;         /* PDS: hdr + id/ver + 256 entries */
+        for (i = 0; i < rects; i++)           /* ODS: hdr + payload per rect */
+            est_size += 3 + 11 + (int64_t)h->rects[i]->w * h->rects[i]->h;
+        est_size += 3;                        /* END */
+        if (est_size > headroom * s->max_cdb_usage) {
+            av_log(avctx, AV_LOG_WARNING,
+                   "PGS rate control: dropping display set "
+                   "(estimated %"PRId64" bytes, CDB headroom "
+                   "%"PRId64" bytes, threshold %.0f%%)\n",
+                   est_size, headroom, s->max_cdb_usage * 100);
+            return 0;
+        }
+    }
+
     s->decode_duration = pgs_compute_decode_duration(avctx, h, state);
     av_log(avctx, AV_LOG_DEBUG,
            "PGS display set: state=%s decode_duration=%"PRId64
@@ -780,6 +807,17 @@ static const AVOption options[] = {
     { "force_all", "Mark all subtitle events as forced",
       OFFSET(force_all), AV_OPT_TYPE_BOOL,
       {.i64 = 0}, 0, 1, SE },
+    { "max_cdb_usage", "Maximum coded data buffer usage (0.0-1.0, "
+      "0=disabled). Events exceeding this threshold are dropped with "
+      "a warning to maintain decoder model compliance.",
+      OFFSET(max_cdb_usage), AV_OPT_TYPE_DOUBLE,
+      {.dbl = 0.0}, 0.0, 1.0, SE },
+    { "forced_style", "Comma-separated list of ASS style names to mark "
+      "as forced subtitles. Events matching any listed style get "
+      "forced_on_flag in the PCS composition descriptor. "
+      "Disabled by default; set to e.g. 'Forced' to enable.",
+      OFFSET(forced_style), AV_OPT_TYPE_STRING,
+      {.str = NULL}, .flags = SE },
     { NULL },
 };
 
