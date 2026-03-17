@@ -3,8 +3,8 @@
  *
  * Renders text (ASS/SSA) subtitle events to cropped bitmaps using
  * libass, quantizes to 256-color palettes, and encodes as bitmap
- * subtitles (PGS).  Handles animation detection, coalescing of
- * overlapping events, and transparent-gap splitting.
+ * subtitles (PGS).  Handles animation detection, event lookahead
+ * for overlapping events, and transparent-gap splitting.
  *
  * Copyright (c) 2026 David Connolly
  *
@@ -53,24 +53,25 @@
 /* Subtitle encoding context                                           */
 /* ------------------------------------------------------------------ */
 
+typedef struct SubEventEntry {
+    char    *text;
+    int64_t  start_pts;  /* AV_TIME_BASE units */
+    int64_t  end_pts;    /* AV_TIME_BASE units */
+} SubEventEntry;
+
 struct SubtitleEncContext {
     FFSubRenderContext *render;
 
     Scheduler *sch;
     unsigned   sch_idx;
 
-    /* Coalescing buffer for overlapping text subtitle events.
-     * Multiple ASS Dialogue lines with the same PTS are buffered
-     * here and rendered as a single composite before encoding. */
-    struct {
-        char    **texts;
-        int64_t  *durations;
-        int       nb;
-        int       cap;
-        int64_t   pts;
-        uint32_t  start_display_time;
-        uint32_t  end_display_time;
-    } coalesce;
+    /* Event lookahead buffer.  Subtitle events are buffered here so
+     * that expirations of overlapping events can be detected and the
+     * remaining active set re-rendered as a fresh Epoch Start. */
+    SubEventEntry *event_buf;
+    int             nb_events;
+    int             event_cap;
+    int64_t         last_ds_pts;  /* PTS of last emitted Display Set */
 };
 
 SubtitleEncContext *enc_sub_alloc(Scheduler *sch, unsigned sch_idx)
@@ -86,15 +87,15 @@ SubtitleEncContext *enc_sub_alloc(Scheduler *sch, unsigned sch_idx)
 void enc_sub_free(SubtitleEncContext **pctx)
 {
     SubtitleEncContext *ctx;
+    int i;
 
     if (!pctx || !*pctx)
         return;
 
     ctx = *pctx;
-    for (int i = 0; i < ctx->coalesce.nb; i++)
-        av_freep(&ctx->coalesce.texts[i]);
-    av_freep(&ctx->coalesce.texts);
-    av_freep(&ctx->coalesce.durations);
+    for (i = 0; i < ctx->nb_events; i++)
+        av_freep(&ctx->event_buf[i].text);
+    av_freep(&ctx->event_buf);
     ff_sub_render_free(&ctx->render);
     av_freep(pctx);
 }
@@ -740,10 +741,12 @@ static int do_subtitle_out_animated(SubtitleEncContext *ctx,
             int fls, fx, fy, fw, fh;
             int64_t fa;
 
-            ret = ff_sub_render_event(ctx->render, text,
-                                             start_ms, duration_ms);
-            if (ret < 0)
-                goto fail_rect;
+            if (!events_loaded) {
+                ret = ff_sub_render_event(ctx->render, text,
+                                                 start_ms, duration_ms);
+                if (ret < 0)
+                    goto fail_rect;
+            }
             ret = ff_sub_render_sample(ctx->render, start_ms,
                                          &first_rgba, &fls,
                                          &fx, &fy, &fw, &fh, NULL);
@@ -1011,77 +1014,103 @@ fail:
 }
 
 /* ------------------------------------------------------------------ */
-/* Event coalescing                                                    */
+/* Event lookahead buffer                                              */
 /* ------------------------------------------------------------------ */
 
-static void sub_coalesce_reset(SubtitleEncContext *ctx)
+static int event_buf_append(SubtitleEncContext *ctx, const char *text,
+                            int64_t start_pts, int64_t end_pts)
 {
-    int i;
-    for (i = 0; i < ctx->coalesce.nb; i++)
-        av_freep(&ctx->coalesce.texts[i]);
-    ctx->coalesce.nb = 0;
+    if (ctx->nb_events >= ctx->event_cap) {
+        int new_cap = ctx->event_cap ? ctx->event_cap * 2 : 4;
+        SubEventEntry *tmp;
+
+        tmp = av_realloc_array(ctx->event_buf, new_cap,
+                               sizeof(*ctx->event_buf));
+        if (!tmp)
+            return AVERROR(ENOMEM);
+        ctx->event_buf = tmp;
+        ctx->event_cap = new_cap;
+    }
+
+    ctx->event_buf[ctx->nb_events].text = av_strdup(text);
+    if (!ctx->event_buf[ctx->nb_events].text)
+        return AVERROR(ENOMEM);
+    ctx->event_buf[ctx->nb_events].start_pts = start_pts;
+    ctx->event_buf[ctx->nb_events].end_pts   = end_pts;
+    ctx->nb_events++;
+    return 0;
 }
 
-static int sub_coalesce_append(SubtitleEncContext *ctx, const char *text,
-                               int64_t duration, int64_t pts,
-                               uint32_t start_display_time,
-                               uint32_t end_display_time)
+static void event_buf_remove(SubtitleEncContext *ctx, int idx)
 {
-    if (ctx->coalesce.nb >= ctx->coalesce.cap) {
-        int new_cap = ctx->coalesce.cap ? ctx->coalesce.cap * 2 : 4;
-        void *tmp;
+    av_freep(&ctx->event_buf[idx].text);
+    ctx->nb_events--;
+    if (idx < ctx->nb_events)
+        ctx->event_buf[idx] = ctx->event_buf[ctx->nb_events];
+}
 
-        /* Grow both arrays. If the second realloc fails, cap is
-         * not updated so the next call retries both arrays. */
-        tmp = av_realloc_array(ctx->coalesce.texts,
-                               new_cap,
-                               sizeof(*ctx->coalesce.texts));
-        if (!tmp)
-            return AVERROR(ENOMEM);
-        ctx->coalesce.texts = tmp;
+/**
+ * Encode a clear (0-rect) Display Set at the given PTS.
+ */
+static int encode_clear_ds(SubtitleEncContext *ctx, OutputStream *ost,
+                           int64_t pts, AVPacket *pkt)
+{
+    Encoder *e = ost->enc;
+    AVCodecContext *enc = e->enc_ctx;
+    int subtitle_out_max_size = 1024 * 1024;
+    int subtitle_out_size, ret;
+    AVSubtitle clear_sub = {0};
 
-        tmp = av_realloc_array(ctx->coalesce.durations,
-                               new_cap,
-                               sizeof(*ctx->coalesce.durations));
-        if (!tmp)
-            return AVERROR(ENOMEM);
-        ctx->coalesce.durations = tmp;
-
-        ctx->coalesce.cap = new_cap;
-    }
-
-    ctx->coalesce.texts[ctx->coalesce.nb] = av_strdup(text);
-    if (!ctx->coalesce.texts[ctx->coalesce.nb])
+    ret = av_new_packet(pkt, subtitle_out_max_size);
+    if (ret < 0)
         return AVERROR(ENOMEM);
-    ctx->coalesce.durations[ctx->coalesce.nb] = duration;
 
-    if (ctx->coalesce.nb == 0) {
-        ctx->coalesce.pts                = pts;
-        ctx->coalesce.start_display_time = start_display_time;
-        ctx->coalesce.end_display_time   = end_display_time;
-    } else {
-        if (end_display_time > ctx->coalesce.end_display_time)
-            ctx->coalesce.end_display_time = end_display_time;
+    e->frames_encoded++;
+
+    subtitle_out_size = avcodec_encode_subtitle(enc, pkt->data,
+                                                pkt->size, &clear_sub);
+    if (subtitle_out_size < 0) {
+        av_log(e, AV_LOG_FATAL, "Subtitle encoding failed\n");
+        av_packet_unref(pkt);
+        return subtitle_out_size;
     }
 
-    ctx->coalesce.nb++;
+    av_shrink_packet(pkt, subtitle_out_size);
+    pkt->time_base = AV_TIME_BASE_Q;
+    pkt->pts       = pts;
+    pkt->dts       = pts;
+    pkt->duration  = 0;
+
+    ret = sch_enc_send(ctx->sch, ctx->sch_idx, pkt);
+    if (ret < 0) {
+        av_packet_unref(pkt);
+        return ret;
+    }
+
     return 0;
 }
 
 /**
- * Flush buffered coalesced subtitle events.
+ * Render and encode the active set of events at a given PTS.
  *
- * Renders all buffered events as a composite, quantizes, and encodes.
- * For animated events, delegates to the multi-timepoint renderer.
+ * Finds all events where start_pts <= pts < end_pts, loads them into
+ * the renderer, and encodes the composite as a Display Set.  If the
+ * active set is empty, emits a clear DS.  Handles animation detection,
+ * region-weighted quantization, and transparent-gap splitting.
  */
-static int flush_coalesced_subtitles(SubtitleEncContext *ctx,
-                                     OutputFile *of, OutputStream *ost,
-                                     AVPacket *pkt)
+static int render_active_set(SubtitleEncContext *ctx,
+                             OutputFile *of, OutputStream *ost,
+                             int64_t pts, AVPacket *pkt)
 {
     Encoder *e = ost->enc;
     AVCodecContext *enc = e->enc_ctx;
-    int64_t start_ms, duration_ms, pts;
-    int ret, i, has_animation = 0;
+    enum AVQuantizeAlgorithm algo = get_quantize_algo(enc);
+    int64_t origin_pts = INT64_MAX;
+    int nb_active = 0, first = 1, has_animation = 0;
+    int64_t max_end_pts = 0;
+    int64_t start_ms, render_ms;
+    int ret, i;
+
     uint8_t *rgba = NULL;
     int linesize, rx, ry, rw, rh;
     int gap_start, gap_end;
@@ -1090,76 +1119,111 @@ static int flush_coalesced_subtitles(SubtitleEncContext *ctx,
     AVSubtitleRect comp_rect  = {0};
     AVSubtitleRect comp_rect2 = {0};
     AVSubtitleRect *comp_rects[2] = { &comp_rect, &comp_rect2 };
-    enum AVQuantizeAlgorithm algo = get_quantize_algo(enc);
 
-    if (ctx->coalesce.nb == 0)
-        return 0;
+    int64_t enc_pts;
 
     ret = ensure_render_context(ctx, ost);
     if (ret < 0)
-        goto cleanup;
+        return ret;
 
-    start_ms    = ctx->coalesce.start_display_time;
-    duration_ms = ctx->coalesce.end_display_time -
-                  ctx->coalesce.start_display_time;
-
-    /* Load all events into render context */
-    ret = ff_sub_render_event(ctx->render,
-              ctx->coalesce.texts[0], start_ms,
-              ctx->coalesce.durations[0]);
-    if (ret < 0)
-        goto cleanup;
-
-    for (i = 1; i < ctx->coalesce.nb; i++) {
-        ret = ff_sub_render_add(ctx->render,
-                  ctx->coalesce.texts[i], start_ms,
-                  ctx->coalesce.durations[i]);
-        if (ret < 0)
-            goto cleanup;
-    }
-
-    /* Check if any text has animation override tags */
-    for (i = 0; i < ctx->coalesce.nb; i++) {
-        if (strchr(ctx->coalesce.texts[i], '{')) {
-            has_animation = 1;
-            break;
+    /* Find earliest start among active events, count actives */
+    for (i = 0; i < ctx->nb_events; i++) {
+        if (ctx->event_buf[i].start_pts <= pts &&
+            pts < ctx->event_buf[i].end_pts) {
+            nb_active++;
+            if (ctx->event_buf[i].start_pts < origin_pts)
+                origin_pts = ctx->event_buf[i].start_pts;
+            if (ctx->event_buf[i].end_pts > max_end_pts)
+                max_end_pts = ctx->event_buf[i].end_pts;
         }
     }
 
+    enc_pts = pts;
+    if (of->start_time != AV_NOPTS_VALUE)
+        enc_pts -= of->start_time;
+
+    if (nb_active == 0) {
+        if (!check_recording_time(ost, enc_pts, AV_TIME_BASE_Q))
+            return AVERROR_EOF;
+        ret = encode_clear_ds(ctx, ost, enc_pts, pkt);
+        if (ret < 0)
+            return ret;
+        ctx->last_ds_pts = pts;
+        return 0;
+    }
+
+    /* Load active events into renderer using origin-relative times */
+    for (i = 0; i < ctx->nb_events; i++) {
+        SubEventEntry *ev = &ctx->event_buf[i];
+        int64_t ev_start_ms, ev_dur_ms;
+
+        if (ev->start_pts > pts || pts >= ev->end_pts)
+            continue;
+
+        ev_start_ms = av_rescale_q(ev->start_pts - origin_pts,
+                                   AV_TIME_BASE_Q,
+                                   (AVRational){ 1, 1000 });
+        ev_dur_ms   = av_rescale_q(ev->end_pts - ev->start_pts,
+                                   AV_TIME_BASE_Q,
+                                   (AVRational){ 1, 1000 });
+
+        if (first) {
+            ret = ff_sub_render_event(ctx->render, ev->text,
+                                      ev_start_ms, ev_dur_ms);
+            first = 0;
+        } else {
+            ret = ff_sub_render_add(ctx->render, ev->text,
+                                    ev_start_ms, ev_dur_ms);
+        }
+        if (ret < 0)
+            return ret;
+
+        if (strchr(ev->text, '{'))
+            has_animation = 1;
+    }
+
+    start_ms  = 0; /* origin-relative start of earliest event */
+    render_ms = av_rescale_q(pts - origin_pts,
+                             AV_TIME_BASE_Q,
+                             (AVRational){ 1, 1000 });
+
     if (has_animation) {
+        int64_t dur_ms = av_rescale_q(max_end_pts - origin_pts,
+                                      AV_TIME_BASE_Q,
+                                      (AVRational){ 1, 1000 });
         AVSubtitle anim_sub = {0};
-        anim_sub.pts                = ctx->coalesce.pts;
-        anim_sub.start_display_time = ctx->coalesce.start_display_time;
-        anim_sub.end_display_time   = ctx->coalesce.end_display_time;
+        anim_sub.pts                = enc_pts;
+        anim_sub.start_display_time = render_ms;
+        anim_sub.end_display_time   = dur_ms;
         ret = do_subtitle_out_animated(ctx, of, ost, &anim_sub,
                                        pkt, NULL, 1);
-        goto cleanup;
+        if (ret < 0)
+            return ret;
+        ctx->last_ds_pts = pts;
+        return 0;
     }
 
     /* Static path: render composite, quantize, encode */
-    ret = ff_sub_render_sample(ctx->render, start_ms,
+    ret = ff_sub_render_sample(ctx->render, render_ms,
               &rgba, &linesize, &rx, &ry, &rw, &rh, NULL);
     if (ret < 0)
-        goto cleanup;
+        return ret;
     if (!rgba) {
-        ret = 0;
-        goto cleanup;
+        ctx->last_ds_pts = pts;
+        return 0;
     }
 
-    pts = ctx->coalesce.pts;
-    if (of->start_time != AV_NOPTS_VALUE)
-        pts -= of->start_time;
-
-    if (!check_recording_time(ost, pts, AV_TIME_BASE_Q)) {
+    if (!check_recording_time(ost, enc_pts, AV_TIME_BASE_Q)) {
         av_free(rgba);
-        ret = AVERROR_EOF;
-        goto cleanup;
+        return AVERROR_EOF;
     }
 
-    /* Build composite subtitle for encoding */
+    /* Build composite subtitle for encoding.  Set end_display_time = 0
+     * so encode_subtitle_packet does not emit an automatic clear DS;
+     * the lookahead handles clear emission at expiration points. */
     memset(&comp_sub, 0, sizeof(comp_sub));
     comp_sub.start_display_time = 0;
-    comp_sub.end_display_time   = duration_ms;
+    comp_sub.end_display_time   = 0;
     comp_sub.rects     = comp_rects;
     comp_sub.num_rects = 1;
 
@@ -1175,22 +1239,29 @@ static int flush_coalesced_subtitles(SubtitleEncContext *ctx,
         qctx = av_quantize_alloc(algo, 256);
         if (!qctx) {
             av_free(rgba);
-            ret = AVERROR(ENOMEM);
-            goto cleanup;
+            return AVERROR(ENOMEM);
         }
 
         /* Region-weighted quantization: render each event separately
          * so NeuQuant samples equally from each, preventing large
          * events from starving small events of palette entries.
          * The composite RGBA (rendered above) is used for apply(). */
-        if (ctx->coalesce.nb > 1) {
-            for (i = 0; i < ctx->coalesce.nb; i++) {
+        if (nb_active > 1) {
+            for (i = 0; i < ctx->nb_events; i++) {
+                SubEventEntry *ev = &ctx->event_buf[i];
                 uint8_t *ev_rgba = NULL;
                 int ev_ls, ev_x, ev_y, ev_w, ev_h, nb_ev_pixels;
+                int64_t ev_dur_ms;
+
+                if (ev->start_pts > pts || pts >= ev->end_pts)
+                    continue;
+
+                ev_dur_ms = av_rescale_q(ev->end_pts - ev->start_pts,
+                                         AV_TIME_BASE_Q,
+                                         (AVRational){ 1, 1000 });
 
                 ret = ff_sub_render_frame(ctx->render,
-                          ctx->coalesce.texts[i], start_ms,
-                          ctx->coalesce.durations[i],
+                          ev->text, start_ms, ev_dur_ms,
                           &ev_rgba, &ev_ls,
                           &ev_x, &ev_y, &ev_w, &ev_h);
                 if (ret < 0 || !ev_rgba) {
@@ -1206,7 +1277,7 @@ static int flush_coalesced_subtitles(SubtitleEncContext *ctx,
                 if (ret < 0) {
                     av_quantize_freep(&qctx);
                     av_free(rgba);
-                    goto cleanup;
+                    return ret;
                 }
             }
         }
@@ -1216,16 +1287,14 @@ static int flush_coalesced_subtitles(SubtitleEncContext *ctx,
         if (nc < 0) {
             av_quantize_freep(&qctx);
             av_free(rgba);
-            ret = nc;
-            goto cleanup;
+            return nc;
         }
 
         indices = av_malloc(nb_pixels);
         if (!indices) {
             av_quantize_freep(&qctx);
             av_free(rgba);
-            ret = AVERROR(ENOMEM);
-            goto cleanup;
+            return AVERROR(ENOMEM);
         }
 
         ret = av_quantize_apply(qctx, rgba, indices, nb_pixels);
@@ -1233,7 +1302,7 @@ static int flush_coalesced_subtitles(SubtitleEncContext *ctx,
         if (ret < 0) {
             av_free(indices);
             av_free(rgba);
-            goto cleanup;
+            return ret;
         }
 
         if (ff_sub_find_gap(rgba, linesize, rw, rh,
@@ -1280,14 +1349,95 @@ static int flush_coalesced_subtitles(SubtitleEncContext *ctx,
         }
     }
 
-    ret = encode_subtitle_packet(ctx, ost, &comp_sub, pts, pkt);
+    ret = encode_subtitle_packet(ctx, ost, &comp_sub, enc_pts, pkt);
+    if (ret >= 0)
+        ctx->last_ds_pts = pts;
 
 cleanup:
     av_freep(&comp_rect.data[0]);
     av_freep(&comp_rect.data[1]);
     av_freep(&comp_rect2.data[0]);
     av_freep(&comp_rect2.data[1]);
-    sub_coalesce_reset(ctx);
+    return ret;
+}
+
+static int int64_cmp(const void *a, const void *b)
+{
+    int64_t va = *(const int64_t *)a;
+    int64_t vb = *(const int64_t *)b;
+    return (va > vb) - (va < vb);
+}
+
+/**
+ * Process expirations in the event buffer up to threshold.
+ *
+ * For each unique end_pts <= threshold (in chronological order),
+ * renders the active set at that instant and removes expired events.
+ */
+static int process_expirations(SubtitleEncContext *ctx,
+                               OutputFile *of, OutputStream *ost,
+                               int64_t threshold, AVPacket *pkt)
+{
+    int64_t *exp_pts = NULL;
+    int nb_exp = 0, exp_cap = 0;
+    int i, j, ret = 0;
+
+    /* Collect unique expiration points <= threshold */
+    for (i = 0; i < ctx->nb_events; i++) {
+        int64_t ep = ctx->event_buf[i].end_pts;
+        int dup;
+
+        if (ep > threshold)
+            continue;
+
+        dup = 0;
+        for (j = 0; j < nb_exp; j++) {
+            if (exp_pts[j] == ep) {
+                dup = 1;
+                break;
+            }
+        }
+        if (dup)
+            continue;
+
+        if (nb_exp >= exp_cap) {
+            int new_cap = exp_cap ? exp_cap * 2 : 4;
+            int64_t *tmp = av_realloc_array(exp_pts, new_cap,
+                                            sizeof(*exp_pts));
+            if (!tmp) {
+                av_freep(&exp_pts);
+                return AVERROR(ENOMEM);
+            }
+            exp_pts = tmp;
+            exp_cap = new_cap;
+        }
+        exp_pts[nb_exp++] = ep;
+    }
+
+    if (nb_exp == 0)
+        return 0;
+
+    qsort(exp_pts, nb_exp, sizeof(*exp_pts), int64_cmp);
+
+    for (i = 0; i < nb_exp; i++) {
+        int64_t ep = exp_pts[i];
+
+        /* Render the active set at this expiration point.
+         * Active means start_pts <= ep < end_pts, but events expiring
+         * at exactly ep are no longer active (ep < end_pts is false
+         * when end_pts == ep). */
+        ret = render_active_set(ctx, of, ost, ep, pkt);
+        if (ret < 0)
+            break;
+
+        /* Remove expired events (end_pts <= ep) */
+        for (j = ctx->nb_events - 1; j >= 0; j--) {
+            if (ctx->event_buf[j].end_pts <= ep)
+                event_buf_remove(ctx, j);
+        }
+    }
+
+    av_freep(&exp_pts);
     return ret;
 }
 
@@ -1303,37 +1453,44 @@ int enc_sub_process(SubtitleEncContext *ctx,
     AVCodecContext *enc = e->enc_ctx;
     int ret;
 
-    /* Coalesce overlapping text subtitle events for PGS bitmap encoding.
-     * Multiple ASS Dialogue lines with the same PTS are buffered and
-     * rendered as a single composite before quantization and encoding. */
+    /* Event lookahead for PGS text-to-bitmap encoding.
+     * Events are buffered so that expirations of overlapping events
+     * can trigger re-rendering of the remaining active set. */
     if (enc->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE &&
         sub->num_rects > 0 &&
         (sub->rects[0]->type == SUBTITLE_ASS ||
          sub->rects[0]->type == SUBTITLE_TEXT)) {
         const char *text = sub->rects[0]->ass ? sub->rects[0]->ass
                                                : sub->rects[0]->text;
+        int64_t start_pts, end_pts;
+
         if (!text || !text[0])
             return 0;
 
-        /* Flush pending events if PTS changed */
-        if (ctx->coalesce.nb > 0 && sub->pts != ctx->coalesce.pts) {
-            ret = flush_coalesced_subtitles(ctx, of, ost, pkt);
-            if (ret < 0)
-                return ret;
-        }
+        start_pts = sub->pts + av_rescale_q(sub->start_display_time,
+                                            (AVRational){ 1, 1000 },
+                                            AV_TIME_BASE_Q);
+        end_pts   = sub->pts + av_rescale_q(sub->end_display_time,
+                                            (AVRational){ 1, 1000 },
+                                            AV_TIME_BASE_Q);
 
-        ret = sub_coalesce_append(ctx, text,
-                    sub->end_display_time - sub->start_display_time,
-                    sub->pts,
-                    sub->start_display_time,
-                    sub->end_display_time);
-        return ret < 0 ? ret : 1; /* 1 = event consumed */
+        /* Process expirations up to the new event's start */
+        ret = process_expirations(ctx, of, ost, start_pts, pkt);
+        if (ret < 0)
+            return ret;
+
+        /* Add event to buffer */
+        ret = event_buf_append(ctx, text, start_pts, end_pts);
+        if (ret < 0)
+            return ret;
+
+        /* Render the current active set at this event's start */
+        ret = render_active_set(ctx, of, ost, start_pts, pkt);
+        if (ret < 0)
+            return ret;
+
+        return 1; /* event consumed */
     }
-
-    /* Flush any pending coalesced events before non-coalesced processing */
-    ret = flush_coalesced_subtitles(ctx, of, ost, pkt);
-    if (ret < 0)
-        return ret;
 
     /* Convert text subtitles to bitmap if encoder requires it */
     ret = convert_text_to_bitmap(ctx, ost, sub);
@@ -1347,5 +1504,58 @@ int enc_sub_flush(SubtitleEncContext *ctx,
                   OutputFile *of, OutputStream *ost,
                   AVPacket *pkt)
 {
-    return flush_coalesced_subtitles(ctx, of, ost, pkt);
+    int64_t *exp_pts = NULL;
+    int nb_exp = 0, exp_cap = 0;
+    int i, j, ret = 0;
+
+    if (ctx->nb_events == 0)
+        return 0;
+
+    /* Collect all unique expiration points */
+    for (i = 0; i < ctx->nb_events; i++) {
+        int64_t ep = ctx->event_buf[i].end_pts;
+        int dup = 0;
+
+        for (j = 0; j < nb_exp; j++) {
+            if (exp_pts[j] == ep) {
+                dup = 1;
+                break;
+            }
+        }
+        if (dup)
+            continue;
+
+        if (nb_exp >= exp_cap) {
+            int new_cap = exp_cap ? exp_cap * 2 : 4;
+            int64_t *tmp = av_realloc_array(exp_pts, new_cap,
+                                            sizeof(*exp_pts));
+            if (!tmp) {
+                av_freep(&exp_pts);
+                return AVERROR(ENOMEM);
+            }
+            exp_pts = tmp;
+            exp_cap = new_cap;
+        }
+        exp_pts[nb_exp++] = ep;
+    }
+
+    qsort(exp_pts, nb_exp, sizeof(*exp_pts), int64_cmp);
+
+    for (i = 0; i < nb_exp; i++) {
+        int64_t ep = exp_pts[i];
+
+        /* Render active set at this expiration point */
+        ret = render_active_set(ctx, of, ost, ep, pkt);
+        if (ret < 0)
+            break;
+
+        /* Remove expired events */
+        for (j = ctx->nb_events - 1; j >= 0; j--) {
+            if (ctx->event_buf[j].end_pts <= ep)
+                event_buf_remove(ctx, j);
+        }
+    }
+
+    av_freep(&exp_pts);
+    return ret;
 }
