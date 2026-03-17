@@ -54,7 +54,7 @@ void enc_sub_free(SubtitleEncContext **pctx);
  * Process a subtitle event for text-to-bitmap conversion.
  *
  * Handles rendering, quantization, animation detection, and
- * coalescing of overlapping text events for PGS encoding.
+ * lookahead buffering of overlapping text events for PGS encoding.
  * If the encoder does not require bitmap subtitles, the event
  * is left unmodified and the caller encodes it normally.
  *
@@ -71,9 +71,10 @@ int enc_sub_process(SubtitleEncContext *ctx,
                     struct AVSubtitle *sub, struct AVPacket *pkt);
 
 /**
- * Flush any pending coalesced subtitle events.
+ * Flush any pending buffered subtitle events.
  *
- * Must be called at end of stream to emit buffered events.
+ * Must be called at end of stream to process remaining expirations
+ * and emit final clear Display Sets.
  *
  * @param ctx  subtitle encoding context
  * @param of   output file
