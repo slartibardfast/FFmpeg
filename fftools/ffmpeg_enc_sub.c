@@ -399,6 +399,72 @@ static int encode_subtitle_packet(SubtitleEncContext *ctx,
 /* Text-to-bitmap conversion (single event, non-animated)              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Check if an ASS dialogue line's style matches the forced_style list.
+ * ASS dialogue format: "ReadOrder,Layer,Style,Speaker,0,0,0,,Text"
+ * The style name is field index 2 (0-indexed, comma-separated).
+ * The forced_style string is a comma-separated list of style names
+ * with optional whitespace around commas.
+ */
+static int ass_style_is_forced(const char *ass_line,
+                               const char *forced_style)
+{
+    const char *p, *style_start, *style_end;
+    int commas = 0;
+
+    if (!ass_line || !forced_style || !forced_style[0])
+        return 0;
+
+    /* Find field 2 (Style) by counting commas */
+    for (p = ass_line; *p; p++) {
+        if (*p == ',') {
+            commas++;
+            if (commas == 2) {
+                style_start = p + 1;
+                break;
+            }
+        }
+    }
+    if (commas < 2)
+        return 0;
+
+    /* Find end of style field */
+    style_end = strchr(style_start, ',');
+    if (!style_end)
+        return 0;
+
+    /* Compare against each entry in the comma-separated forced_style list */
+    p = forced_style;
+    while (*p) {
+        const char *entry_start, *entry_end;
+        int entry_len, style_len;
+
+        /* Skip leading whitespace */
+        while (*p == ' ' || *p == '\t') p++;
+        entry_start = p;
+
+        /* Find end of this entry (comma or end of string) */
+        entry_end = strchr(p, ',');
+        if (!entry_end)
+            entry_end = p + strlen(p);
+
+        /* Trim trailing whitespace */
+        p = entry_end;
+        while (p > entry_start && (p[-1] == ' ' || p[-1] == '\t'))
+            p--;
+        entry_len = p - entry_start;
+
+        style_len = style_end - style_start;
+        if (entry_len == style_len &&
+            !strncmp(entry_start, style_start, entry_len))
+            return 1;
+
+        /* Advance past comma */
+        p = *entry_end ? entry_end + 1 : entry_end;
+    }
+    return 0;
+}
+
 static int convert_text_to_bitmap(SubtitleEncContext *ctx,
                                   OutputStream *ost,
                                   AVSubtitle *sub)
@@ -406,6 +472,7 @@ static int convert_text_to_bitmap(SubtitleEncContext *ctx,
     AVCodecContext *enc_ctx = ost->enc->enc_ctx;
     const AVCodecDescriptor *enc_desc;
     enum AVQuantizeAlgorithm algo = get_quantize_algo(enc_ctx);
+    char *forced_style_str = NULL;
     int need_convert = 0;
     unsigned i;
     int ret;
@@ -428,6 +495,13 @@ static int convert_text_to_bitmap(SubtitleEncContext *ctx,
     if (ret < 0)
         return ret;
 
+    /* Read forced_style once for the entire subtitle (constant per encode) */
+    {
+        char *fs = NULL;
+        av_opt_get(enc_ctx->priv_data, "forced_style", 0, (uint8_t **)&fs);
+        forced_style_str = fs; /* NULL if option not set or empty */
+    }
+
     for (i = 0; i < sub->num_rects; i++) {
         AVSubtitleRect *rect = sub->rects[i];
         const char *text;
@@ -435,6 +509,7 @@ static int convert_text_to_bitmap(SubtitleEncContext *ctx,
         int linesize, rx, ry, rw, rh;
         int64_t start_ms, duration_ms;
         int gap_start, gap_end;
+        int style_forced = 0;
 
         if (rect->type != SUBTITLE_ASS && rect->type != SUBTITLE_TEXT)
             continue;
@@ -442,6 +517,10 @@ static int convert_text_to_bitmap(SubtitleEncContext *ctx,
         text = rect->ass ? rect->ass : rect->text;
         if (!text || !text[0])
             continue;
+
+        /* Check if this event's ASS style matches forced_style before
+         * the ASS text is freed during bitmap conversion. */
+        style_forced = ass_style_is_forced(text, forced_style_str);
 
         start_ms    = sub->start_display_time;
         duration_ms = sub->end_display_time - sub->start_display_time;
@@ -563,8 +642,20 @@ static int convert_text_to_bitmap(SubtitleEncContext *ctx,
                 av_free(rgba);
             }
         }
+
+        /* Set forced flag on all rects created from this event if its
+         * ASS style matches the forced_style list.  This covers both
+         * the primary rect and any split rect appended at the end. */
+        if (style_forced) {
+            rect->flags |= AV_SUBTITLE_FLAG_FORCED;
+            /* Flag any rects appended by the gap-split above */
+            for (int k = sub->num_rects - 1;
+                 k > i && sub->rects[k]->type == SUBTITLE_BITMAP; k--)
+                sub->rects[k]->flags |= AV_SUBTITLE_FLAG_FORCED;
+        }
     }
 
+    av_free(forced_style_str);
     return 0;
 }
 
