@@ -2102,6 +2102,10 @@ const OptionDef options[] = {
         { .off = OFFSET(canvas_sizes) },
         "set canvas size (WxH or abbreviation)", "size" },
 
+    { "forced_subs_filter", OPT_TYPE_STRING, OPT_SUBTITLE | OPT_PERSTREAM | OPT_OUTPUT,
+        { .off = OFFSET(forced_subs_filter) },
+        "filter subtitle events by forced flag (all, forced, non_forced)", "mode" },
+
     /* muxer options */
     { "muxdelay",   OPT_TYPE_FLOAT, OPT_EXPERT | OPT_OFFSET | OPT_OUTPUT,
         { .off = OFFSET(mux_max_delay) },
