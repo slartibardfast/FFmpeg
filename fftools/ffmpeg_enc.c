@@ -28,6 +28,7 @@
 #include "libavutil/display.h"
 #include "libavutil/eval.h"
 #include "libavutil/frame.h"
+#include "libavutil/opt.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/log.h"
 #include "libavutil/mem.h"
@@ -414,6 +415,36 @@ static int do_subtitle_out(OutputFile *of, OutputStream *ost, const AVSubtitle *
 
         if (!check_recording_time(ost, pts, AV_TIME_BASE_Q))
             return AVERROR_EOF;
+
+        /* Propagate stream-level forced disposition to per-rect flags */
+        if (local_sub.num_rects > 0 &&
+            ost->ist && (ost->ist->st->disposition & AV_DISPOSITION_FORCED)) {
+            for (int j = 0; j < local_sub.num_rects; j++)
+                local_sub.rects[j]->flags |= AV_SUBTITLE_FLAG_FORCED;
+        }
+
+        /* Propagate encoder force_all to output stream disposition */
+        if (!(ost->st->disposition & AV_DISPOSITION_FORCED)) {
+            int64_t force_all = 0;
+            if (av_opt_get_int(enc->priv_data, "force_all", 0,
+                               &force_all) >= 0 && force_all)
+                ost->st->disposition |= AV_DISPOSITION_FORCED;
+        }
+
+        /* Filter rects by forced flag if -forced_subs_filter is set */
+        if (ost->forced_subs_filter && local_sub.num_rects > 0) {
+            int want = (ost->forced_subs_filter == SUB_FORCED_ONLY);
+            int j = 0, k;
+            for (k = 0; k < local_sub.num_rects; k++) {
+                int is_forced = !!(local_sub.rects[k]->flags &
+                                   AV_SUBTITLE_FLAG_FORCED);
+                if (is_forced == want)
+                    local_sub.rects[j++] = local_sub.rects[k];
+            }
+            if (j == 0)
+                return 0;  /* no matching rects -- skip event */
+            local_sub.num_rects = j;
+        }
 
         ret = av_new_packet(pkt, subtitle_out_max_size);
         if (ret < 0)

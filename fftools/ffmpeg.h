@@ -240,6 +240,7 @@ typedef struct OptionsContext {
     SpecifierOptList fix_sub_duration;
     SpecifierOptList fix_sub_duration_heartbeat;
     SpecifierOptList canvas_sizes;
+    SpecifierOptList forced_subs_filter;
     SpecifierOptList pass;
     SpecifierOptList passlogfiles;
     SpecifierOptList max_muxing_queue_size;
@@ -700,6 +701,12 @@ typedef struct OutputStream {
      * subtitles utilizing fix_sub_duration at random access points.
      */
     unsigned int fix_sub_duration_heartbeat;
+
+    /* forced subtitle filter: 0=all (default), 1=forced only, 2=non-forced only */
+#define SUB_FORCED_ALL       0
+#define SUB_FORCED_ONLY      1
+#define SUB_NON_FORCED_ONLY  2
+    int         forced_subs_filter;
 } OutputStream;
 
 typedef struct OutputFile {
