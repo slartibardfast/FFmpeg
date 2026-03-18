@@ -454,6 +454,18 @@ static int do_subtitle_out(OutputFile *of, OutputStream *ost, const AVSubtitle *
         }
         pkt->dts = pkt->pts;
 
+        /* PGS: set DTS per HDMV decoder timing model.
+         * Use Epoch Start formula (full-screen clear) as a
+         * conservative upper bound on decode duration. */
+        if (enc->codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE &&
+            local_sub.num_rects > 0) {
+            int64_t dd = ((int64_t)90000 * enc->width * enc->height +
+                          32000000 - 1) / 32000000;
+            int64_t dd_tb = av_rescale_q(dd,
+                                (AVRational){ 1, 90000 }, pkt->time_base);
+            pkt->dts = FFMAX(pkt->pts - dd_tb, 0);
+        }
+
         ret = sch_enc_send(ep->sch, ep->sch_idx, pkt);
         if (ret < 0) {
             av_packet_unref(pkt);
