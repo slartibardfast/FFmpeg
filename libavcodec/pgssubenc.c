@@ -633,6 +633,16 @@ static int pgssub_encode(AVCodecContext *avctx, uint8_t *outbuf,
                    h->rects[i]->w, h->rects[i]->h);
             return AVERROR(EINVAL);
         }
+        if (h->rects[i]->x + h->rects[i]->w > avctx->width ||
+            h->rects[i]->y + h->rects[i]->h > avctx->height) {
+            av_log(avctx, AV_LOG_ERROR,
+                   "Subtitle rect %dx%d+%d+%d extends beyond "
+                   "video frame %dx%d\n",
+                   h->rects[i]->w, h->rects[i]->h,
+                   h->rects[i]->x, h->rects[i]->y,
+                   avctx->width, avctx->height);
+            return AVERROR(EINVAL);
+        }
     }
 
     if (avctx->width > 0xFFFF || avctx->height > 0xFFFF) {
