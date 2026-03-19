@@ -295,8 +295,13 @@ int ff_neuquant_learn(FFNeuQuantContext *ctx, const uint8_t *rgba,
     init_network(ctx);
 
     samplepixels = nb_pixels / samplefac;
-    if (samplepixels < 1)
-        samplepixels = 1;
+    /* Ensure enough learning iterations for convergence. With very
+     * small images (< PRIME4 pixels), samplepixels may be too low
+     * for the learning rate decay (alpha/radius) to work properly.
+     * The pixel walk wraps via coprime modular arithmetic, so extra
+     * iterations revisit pixels uniformly — each pixel gets
+     * approximately equal weight across the additional cycles. */
+    samplepixels = FFMAX(samplepixels, PRIME4);
     delta = FFMAX(samplepixels / NCYCLES, 1);
 
     alpha  = INITALPHA;
